@@ -572,6 +572,9 @@ class _KanbanNotification:
             self.wake_handoff = handoff
         if review_detail is not None:
             self.wake_review_detail = review_detail
+        if self.platform_str == "slack":
+            from gateway.kanban_ping_slack import format_slack_ping
+            return format_slack_ping(ev, self)
         return msg
 
     def build_wake_text(self) -> None:
