@@ -12,6 +12,23 @@ import json
 
 import pytest
 
+# SessionDB's user-turn classifier lazily imports this consumer to avoid a cycle.
+# Initialize process dependencies during collection, before guarded fixture I/O;
+# PM discovers its payload relative to the checkout, not the temporary HERMES_HOME.
+from agent import conversation_loop
+from hermes_state_guard import _real_platform_state_root
+
+_REAL_HOME = _real_platform_state_root()
+
+
+@pytest.mark.parametrize("mode", ["r", "w"])
+def test_session_classifier_import_keeps_real_home_manifest_guard(mode):
+    """Initializing the real consumer must not exempt install-parent state from the guard."""
+    assert callable(conversation_loop.run_conversation)
+    with pytest.raises(AssertionError, match="file I/O against the REAL hermes home"):
+        with (_REAL_HOME / "manifest.json").open(mode, encoding="utf-8"):
+            pytest.fail("the guard must refuse the open before any production-home I/O")
+
 
 # ---------------------------------------------------------------------------
 # Gating
