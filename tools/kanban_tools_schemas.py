@@ -164,6 +164,14 @@ KANBAN_COMPLETE_SCHEMA = _schema(
     [],
 )
 
+_NOTIFICATION_FIELDS = {
+    "ask": {"type": "string", "maxLength": 200, "description":
+            "Optional imperative action (at most 200 characters): what the recipient must do. "
+            "Keep evidence in reason/summary, not in ask."},
+    "audience": {"type": "string", "enum": ["human", "agent"], "description":
+                 "Who must act: human for operator decisions/manual steps, agent for an assigned worker."},
+}
+
 KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
@@ -198,6 +206,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
     },
     ["reason"],
 )
+
+KANBAN_BLOCK_SCHEMA["parameters"]["properties"].update(_NOTIFICATION_FIELDS)
 
 KANBAN_SCHEDULE_SCHEMA = _schema(
     "kanban_schedule",
@@ -286,6 +296,9 @@ KANBAN_REQUEST_CHANGES_SCHEMA = _schema(
     },
     ["reason"],
 )
+
+KANBAN_REQUEST_REVIEW_SCHEMA["parameters"]["properties"].update(_NOTIFICATION_FIELDS)
+KANBAN_REQUEST_CHANGES_SCHEMA["parameters"]["properties"].update(_NOTIFICATION_FIELDS)
 
 KANBAN_HEARTBEAT_SCHEMA = _schema(
     "kanban_heartbeat",

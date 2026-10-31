@@ -6,6 +6,7 @@ from functools import partial
 from types import SimpleNamespace
 
 from agent.i18n import t
+from gateway.kanban_notify_summarizer import event_audience
 from gateway.kanban_ping_slack import _escape, _headline, _safe, format_slack_ping
 
 logger = logging.getLogger(__name__)
@@ -40,21 +41,36 @@ def _snapshot(n):
         return task, [kb.Event.from_row(row) for row in reversed(rows)]
 
 
-def format_card(n, task, events):
-    """Use saved current state for the ask; old queued events belong only in history."""
+def current_event(task, events):
+    """Select the current-state event, never a stale queued ask."""
     status = task.status if task else "unknown"
     current = next((ev for ev in reversed(events) if _event_status(ev) == status),
                    SimpleNamespace(kind="status", payload={"status": status}))
     if current.kind in {"claimed", "promoted", "created"}:
         current = SimpleNamespace(kind="status", payload={"status": status})
+    return current
+
+
+def format_card(n, task, events, current=None):
+    """Use saved current state for the ask; old queued events belong only in history."""
+    status = task.status if task else "unknown"
+    current = current if current is not None else current_event(task, events)
     context = SimpleNamespace(task=task, title=task.title if task else n.task_id,
                               task_id=n.task_id, board_slug=n.board_slug)
     lines = format_slack_ping(current, context).splitlines()
     payload = current.payload or {}
-    ask = payload.get("ask") or payload.get("reason") or payload.get("summary") or payload.get("error")
-    if not ask and status == "done":
-        ask = getattr(task, "result", "")
-    ask = _escape(_safe(ask, 200)) if ask else t("gateway.kanban.ping.slack.no_ask")
+    ask = payload.get("ask") if event_audience(current) == "human" else None
+    ask_line = [t("gateway.kanban.ping.slack.ask", value=_escape(_safe(ask, 200)))] if ask else []
+    facts = [payload.get("why"), *(payload.get("evidence") or [])]
+    details = _escape(_safe(" · ".join(_safe(value, 200) for value in facts if value), 200))
+    detail_line = [t("gateway.kanban.ping.slack.details", value=details)] if details else []
+
+    key = {"blocked": "card_attention", "triage": "card_attention", "review": "card_review"}.get(status, "card_fyi")
+    if event_audience(current) == "agent":
+        key = "card_fyi"
+    headline = t("gateway.kanban.ping.slack." + key)
+    if current.kind in {"crashed", "timed_out", "gave_up"} or (event_audience(current) == "agent" and payload.get("ask")):
+        headline = _headline(current)
     trail = []
     last_status = None
     for ev in events:
@@ -65,8 +81,8 @@ def format_card(n, task, events):
         trail.append(f"{_escape(_safe(state, 24))} {timestamp}")
         last_status = state
     return "\n".join([
-        lines[1], f"[{_escape(_safe(status, 24)).upper()}] {lines[0]}",
-        t("gateway.kanban.ping.slack.ask", value=ask), lines[2],
+        lines[1], f"[{_escape(_safe(status, 24)).upper()}] {headline}",
+        *ask_line, lines[2], *detail_line,
         t("gateway.kanban.ping.slack.trail", value=" → ".join(trail[-8:])),
     ])
 
@@ -74,7 +90,7 @@ def format_card(n, task, events):
 def format_history(ev):
     """One line per delivered event, without repeating the whole card."""
     payload = ev.payload or {}
-    detail = payload.get("ask") or payload.get("reason") or payload.get("summary") or payload.get("error")
+    detail = payload.get("reason") or payload.get("summary") or payload.get("error") or payload.get("ask")
     timestamp = datetime.fromtimestamp(ev.created_at, UTC).strftime("%H:%M")
     text = f"{timestamp} UTC · {_headline(ev)}"
     if detail:
@@ -85,9 +101,11 @@ def format_history(ev):
 async def send_card_event(n, ev, metadata):
     """Post the first root, then edit + reply; persist the root before the next event in a batch."""
     from gateway.kanban_watchers_common import _to_thread_process_service
+    from gateway.kanban_notify_summarizer import enrich_event
 
     task, events = await _to_thread_process_service(_snapshot, n)
-    card = format_card(n, task, events)
+    current = await enrich_event(current_event(task, events), board=n.board_slug)
+    card = format_card(n, task, events, current=current)
     root = metadata.get("thread_ts")
     if root:
         try:

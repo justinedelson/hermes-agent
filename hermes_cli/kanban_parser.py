@@ -314,6 +314,8 @@ _SPECS = [
     ], help="Edit task fields or recovery fields on an already-completed task"),
     _cmd("block", [
         _TASK_ID,
+        _arg("--ask", help="Imperative action for the recipient (at most 200 characters)"),
+        _arg("--audience", choices=["human", "agent"], help="Who must act"),
         _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
         _bulk_ids("block"),
         _arg("--kind", choices=sorted(kb.VALID_BLOCK_KINDS),
@@ -334,6 +336,8 @@ _SPECS = [
     ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
     _cmd("request-review", [
         _TASK_ID,
+        _arg("--ask", help="Imperative action for the recipient (at most 200 characters)"),
+        _arg("--audience", choices=["human", "agent"], help="Who must act"),
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),
         _arg("--reviewer", help="Optional reviewer profile; reassigns the task before review dispatch."),
         _arg("--metadata", help="JSON object with structured reviewer handoff facts."),
@@ -341,7 +345,9 @@ _SPECS = [
              help="Override the live-claim guard: move a running, claimed "
                   "task to review even without owning its run (clears the worker's claim)."),
     ], help="Move a task to 'review' (implementation done, awaiting review) — NOT a block"),
-    _cmd("request-changes", [_TASK_ID, _arg("reason", nargs="+", help="Concrete changes required before re-review")],
+    _cmd("request-changes", [_TASK_ID, _arg("reason", nargs="+", help="Concrete changes required before re-review"),
+         _arg("--ask", help="Imperative action for the recipient (at most 200 characters)"),
+         _arg("--audience", choices=["human", "agent"], help="Who must act")],
          help="Reviewer verdict: return the active review run to its implementer"),
     _cmd("reopen-review", [
         _TASK_IDS,

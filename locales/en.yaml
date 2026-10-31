@@ -246,7 +246,10 @@ gateway:
       slack:
         archived: "📦 **Archived — no action needed**"
         unblocked: "▶ **Unblocked — queued for work; no action needed**"
-        no_ask: "No additional action specified; see the status above."
+        card_fyi: "**No action needed**"
+        card_attention: "**Your action needed**"
+        card_review: "**Your review needed**"
+        agent_action: "**No action needed — agent: {value}**"
         ask: "**Ask:** {value}"
         trail: "**Status trail (UTC):** {value}"
         completed: "✔ **Completed — no action needed**"

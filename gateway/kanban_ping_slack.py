@@ -4,6 +4,7 @@ import json
 import re
 
 from agent.i18n import t
+from gateway.kanban_notify_summarizer import event_audience
 
 _PR = re.compile(r"(?:https?://)?github\.com/([\w.-]+/[\w.-]+)(?:/pull/|#)(\d+)\b")
 _JIRA = re.compile(r"https?://[^\s<>\"'|]+/browse/([A-Z][A-Z0-9]+-\d+)\b")
@@ -61,6 +62,14 @@ _HEADLINE_VARIANTS = {
 
 def _headline(ev):
     """An assigned reviewer/implementer owns handoffs; only input gates ask the human."""
+    payload = ev.payload or {}
+    if event_audience(ev) == "agent" and payload.get("ask"):
+        action = t("gateway.kanban.ping.slack.agent_action", value=_escape(_safe(payload["ask"], 200)))
+        if ev.kind in {"crashed", "timed_out", "gave_up"}:
+            return t("gateway.kanban.ping.slack." + ev.kind) + " · " + action
+        return action
+    if payload.get("audience") == "human" and ev.kind in {"review_requested", "changes_requested"}:
+        return t("gateway.kanban.ping.slack." + ev.kind + "_human")
     variant = _HEADLINE_VARIANTS.get(ev.kind)
     key, values = variant(ev.payload or {}) if variant else (ev.kind, {})
     return t("gateway.kanban.ping.slack." + key, **values)
@@ -69,7 +78,7 @@ def _headline(ev):
 def format_slack_ping(ev, n):
     """Render outcome, title, context, then a clipped worker handoff."""
     payload = ev.payload or {}
-    details = payload.get("reason") or payload.get("summary") or payload.get("error")
+    details = payload.get("why") or payload.get("reason") or payload.get("summary") or payload.get("error")
     if not details and ev.kind == "completed":
         details = getattr(n.task, "result", "")
     # Discover links before clipping prose, including published PRs in structured handoff metadata.
@@ -82,6 +91,8 @@ def format_slack_ping(ev, n):
     context += _links(references)
     # send() accepts standard Markdown; the Slack adapter converts bold to mrkdwn.
     text = f"{_headline(ev)}\n**{_escape(_safe(n.title, 120))}**\n{' · '.join(context)}"
+    if payload.get("ask") and event_audience(ev) == "human":
+        text += "\n" + t("gateway.kanban.ping.slack.ask", value=_escape(_safe(payload["ask"], 200)))
     if details:
         # Mobile pings stay short even when notify_reason_max_chars disables clipping for wake detail.
         text += "\n" + t("gateway.kanban.ping.slack.details", value=_escape(_safe(details)))

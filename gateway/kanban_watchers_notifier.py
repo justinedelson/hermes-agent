@@ -699,7 +699,14 @@ class _KanbanNotification:
                 from gateway.kanban_slack_card import send_card_event
                 _send_res = await send_card_event(self, ev, metadata)
             else:
-                _send_res = await adapter.send(sub["chat_id"], msg, metadata=metadata)
+                if self.platform_str == "slack":
+                    from gateway.kanban_notify_summarizer import enrich_event
+                    from gateway.kanban_ping_slack import format_slack_ping
+                    enriched = await enrich_event(ev, board=self.board_slug)
+                    text = format_slack_ping(enriched, self)
+                else:
+                    text = msg
+                _send_res = await adapter.send(sub["chat_id"], text, metadata=metadata)
         if not await present_notification(send_ping, platform=self.platform_str, diagnostic=diagnostic_event(ev)):
             return False
         # SendResult(success=False) without an exception is a FAILED delivery

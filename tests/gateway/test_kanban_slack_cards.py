@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -27,6 +27,8 @@ class FakeSlackClient:
 
 
 def setup(tmp_path, monkeypatch, metadata=None, thread_id=""):
+    from agent import auxiliary_client
+    monkeypatch.setattr(auxiliary_client, "call_llm", Mock(side_effect=RuntimeError("offline")))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
     client = FakeSlackClient()
     adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
@@ -179,6 +181,7 @@ def test_card_ask_and_history_are_safe_and_artifacts_stay_in_card_thread(tmp_pat
         conn.execute("UPDATE tasks SET status='review' WHERE id=?", (task_id,))
         kb._append_event(conn, task_id, "review_requested", {
             "reviewer": "qa", "ask": "Review <@U123>\nSee /home/alice/private/log",
+            "audience": "human",
             "summary": "Verified https://github.com/example/services/pull/42", "artifacts": [],
         })
         conn.commit()
@@ -186,7 +189,7 @@ def test_card_ask_and_history_are_safe_and_artifacts_stay_in_card_thread(tmp_pat
     card = client.calls[0][1]["text"]
     assert "Review &lt;@U123&gt; See [local path]" in card
     assert "<https://github.com/example/services/pull/42|PR #42>" in card
-    assert "qa reviewing; no action needed" in card
+    assert "Your review needed" in card
     kwargs = runner._deliver_kanban_artifacts.await_args.kwargs
     assert kwargs["metadata"]["thread_ts"] == "100.000001"
 
@@ -228,6 +231,59 @@ def test_claimed_current_state_has_a_rendered_headline(tmp_path, monkeypatch):
     asyncio.run(deliver(runner, collect(runner)))
     card = client.calls[0][1]["text"]
     assert "[RUNNING]" in card
-    assert "Status → running — no action needed" in card
+    assert "No action needed" in card
+    assert "Status → running" not in card
+    assert "Ask:" not in card
     assert "gateway.kanban" not in card
     assert "Old question" not in card
+
+
+def test_live_card_consumes_auxiliary_action_and_preserves_raw_history(tmp_path, monkeypatch):
+    import json
+    from agent import auxiliary_client
+    runner, client, task_id = setup(tmp_path, monkeypatch)
+    change(task_id, "running")
+    asyncio.run(deliver(runner, collect(runner)))
+    response = {"ask": "Log in and run manual Tier tests", "audience": "human",
+                "why": "Manual verification remains", "evidence": [], "links": []}
+    aux = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(response)))]))
+    monkeypatch.setattr(auxiliary_client, "call_llm", aux)
+    change(task_id, "blocked", reason="Raw worker evidence: CI green; manual verification remains")
+    asyncio.run(deliver(runner, collect(runner)))
+    update = [kwargs for method, kwargs in client.calls if method == "update"][-1]
+    assert "Log in and run manual Tier tests" in update["text"]
+    assert "Raw worker evidence" not in update["text"]
+    reply = client.calls[-1][1]
+    assert reply["thread_ts"] == "100.000001"
+    assert "Raw worker evidence" in reply["text"]
+    assert aux.call_count == 1
+
+
+def test_summarizer_timeout_delivers_raw_card_and_checkpoints_event(tmp_path, monkeypatch):
+    import threading
+    from agent import auxiliary_client
+    from gateway import kanban_notify_summarizer as summaries
+    runner, client, task_id = setup(tmp_path, monkeypatch)
+    release = threading.Event()
+    finished = threading.Event()
+
+    def stalled(**kwargs):
+        try:
+            release.wait(10)
+            raise RuntimeError("provider ignored timeout")
+        finally:
+            finished.set()
+
+    aux = Mock(side_effect=stalled)
+    monkeypatch.setattr(auxiliary_client, "call_llm", aux)
+    monkeypatch.setattr(summaries, "TIMEOUT_SECONDS", 0.05)
+    change(task_id, "blocked", reason="Choose a region; keep Draft, do not merge")
+    try:
+        asyncio.run(deliver(runner, collect(runner)))
+        assert len(client.calls) == 1
+        assert "Choose a region; keep Draft, do not merge" in client.calls[0][1]["text"]
+        assert not collect(runner)
+        assert aux.call_count == 1
+    finally:
+        release.set()
+        assert finished.wait(2)

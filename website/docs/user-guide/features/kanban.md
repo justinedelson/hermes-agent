@@ -526,6 +526,41 @@ The auto-injected kanban guidance teaches the model which tool to call when and 
 
 ### Recommended handoff evidence
 
+Blocks and review handoffs accept optional action ownership alongside their evidence:
+
+```python
+kanban_block(reason="The deployment needs a region", kind="needs_input",
+             ask="Choose the deployment region", audience="human")
+kanban_request_review(summary="Implementation and tests complete", reviewer="reviewer",
+                      ask="Review the change; do not merge", audience="agent")
+kanban_request_changes(reason="Missing boundary coverage",
+                       ask="Add the boundary test", audience="agent")
+```
+
+`ask` is a nonblank imperative of at most 200 characters; `audience` is `human` or
+`agent`. Put the verification facts in `reason`/`summary`, not the ask. The CLI
+supports `--ask` and `--audience` on `block`, `request-review` and `request-changes`.
+The fields are validated and redacted before being saved on the transition event.
+Omitting them preserves compatibility with existing workers and integrations.
+
+For legacy Slack events with a reason but no ask, the notifier uses the ordinary
+`auxiliary.kanban_notify_summarizer` route to extract
+`{ask, audience, why, evidence, links}`. Select a fast model with `hermes config set
+auxiliary.kanban_notify_summarizer.provider <provider>` and `hermes config set
+auxiliary.kanban_notify_summarizer.model <model>` in the **subscriber's profile**.
+An eight-second end-to-end wait bounds provider resolution, queueing and retries;
+errors, invalid JSON, exhausted local call capacity or timeout fall back to clipped,
+redacted raw text. A bounded process cache shares successful summaries and failures
+across subscriptions/retries by profile, resolved board, task and event id. At most
+four background calls can remain active, even if a provider ignores its timeout.
+
+These are presentation-only summaries: raw transition evidence and agent wake
+reasons remain unchanged, and inferred ownership never changes board state.
+Explicit audience and typed owner-input gates take precedence over model inference.
+Live cards omit the Ask line when there is no action or when the extracted action
+belongs to an agent, and show a single status chip plus action-first summary.
+Raw worker prose remains in the compact thread history; the board retains the full reason.
+
 `kanban_complete(summary=..., metadata={...})` is intentionally flexible:
 the summary is the human-readable closeout, and `metadata` is the
 machine-readable handoff that downstream agents, reviewers, or dashboards can
