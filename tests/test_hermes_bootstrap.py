@@ -31,18 +31,38 @@ from pathlib import Path
 import pytest
 
 
-# Import the module under test via an import-time side-effect check path.
-# We need to be able to reset its state between tests, so we import it
-# fresh in each test that manipulates _IS_WINDOWS.
 def _fresh_import():
-    """Return a freshly-imported hermes_bootstrap module.
+    """Refresh bootstrap helpers through the supported stdlib-only startup path.
 
-    Drops any cached copy from sys.modules first so module-level code
-    runs again and the platform check re-evaluates.
+    Non-PM helper tests need real import side effects, not install discovery under
+    the per-test home guard. PM activation tests must use their own launch inputs.
     """
+    from unittest.mock import patch
+
     sys.modules.pop("hermes_bootstrap", None)
-    import hermes_bootstrap  # noqa: WPS433
+    with patch.object(sys, "argv", ["hermes", "pm", "repair"]):
+        import hermes_bootstrap  # noqa: WPS433
     return hermes_bootstrap
+
+
+def test_fresh_helper_import_restores_caller_argv_and_runs_real_helpers(monkeypatch):
+    caller_argv = ["pytest", "--caller-option"]
+    monkeypatch.setattr(sys, "argv", caller_argv)
+    monkeypatch.setattr(sys, "path", sys.path[:])
+    root = str(Path(__file__).resolve().parents[1])
+
+    first = _fresh_import()
+    second = _fresh_import()
+
+    assert sys.argv is caller_argv
+    assert sys.argv == ["pytest", "--caller-option"]
+    assert first is not second
+    assert second is sys.modules["hermes_bootstrap"]
+    assert second._pm_repair is True
+    assert second._bootstrap_applied is (sys.platform == "win32")
+    sys.path[:] = ["", ".", root]
+    second.harden_import_path(src_root=root)
+    assert sys.path == [root]
 
 
 class TestWindowsBehavior:

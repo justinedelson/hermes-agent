@@ -24,6 +24,10 @@ from pathlib import Path
 
 import pytest
 
+# Bootstrap install discovery belongs after the collection-time home sandbox,
+# before the per-test guard; the CLI/logging import below still runs under it.
+import hermes_bootstrap
+
 
 def _real_hermes_home() -> Path:
     """Where the operator's logs live, ignoring any test sandboxing."""
