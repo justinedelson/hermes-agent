@@ -3,11 +3,30 @@ import pytest
 
 from pathlib import Path
 from types import SimpleNamespace
+# Process bootstrap belongs to collection, before guarded notifier execution.
+# PM discovers payload dependencies relative to the checkout, not HERMES_HOME.
+from gateway.run import GatewayRunner
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Capture the native root before per-test fixtures redirect Hermes paths.
+from hermes_state_guard import _real_platform_state_root
+
+_REAL_HOME = _real_platform_state_root()
+
+
+@pytest.mark.parametrize("mode", ["r", "w"])
+def test_gateway_import_keeps_real_home_manifest_guard(mode):
+    """Gateway availability must not exempt install-parent state from the I/O guard."""
+
+    assert callable(GatewayRunner._kanban_notifier_watcher)
+    with pytest.raises(AssertionError, match="file I/O against the REAL hermes home"):
+        with (_REAL_HOME / "manifest.json").open(mode, encoding="utf-8"):
+            pytest.fail("the production-home guard must refuse the open before any I/O")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -193,7 +212,6 @@ async def test_notifier_notify_plus_wake_sends_and_wakes(kanban_home):
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     conn = kbc.connect()
@@ -258,7 +276,6 @@ async def test_notifier_plain_notify_never_wakes_even_with_session_id(kanban_hom
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     conn = kbc.connect()
@@ -311,7 +328,6 @@ async def test_notifier_notify_wake_does_not_wake_on_status_event(kanban_home):
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     conn = kbc.connect()
@@ -362,7 +378,6 @@ async def test_notifier_wake_forwards_persisted_chat_type_and_user_id(kanban_hom
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     conn = kbc.connect()
@@ -418,7 +433,6 @@ async def test_notifier_wake_only_skips_send_and_advances_cursor(kanban_home):
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     conn = kbc.connect()
@@ -491,7 +505,6 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     conn = kbc.connect()
@@ -553,7 +566,6 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
 @pytest.mark.asyncio
 async def test_notifier_wakes_origin_for_review_and_keeps_subscription(kanban_home):
     from gateway.config import Platform
-    from gateway.run import GatewayRunner
 
     with kbc.connect() as conn:
         task_id = kb.create_task(conn, title="review handoff", assignee="builder")
@@ -615,7 +627,6 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     flag appears before the subcommand, and the subscription must land in
     that board's DB rather than the ambient/default board.
     """
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     kb.create_board("projx")
@@ -691,7 +702,6 @@ async def test_gateway_autosubscribe_roundtrips_user_id_alt_for_session_key(
     key built from the original source with the key rebuilt from the persisted
     row.
     """
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
     from gateway.session import SessionSource, build_session_key
 
@@ -763,7 +773,6 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
     from tools import kanban_tools as kt
 
@@ -844,7 +853,6 @@ async def test_notifier_uploads_review_handoff_artifacts(kanban_home, tmp_path, 
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
     from hermes_cli import kanban_db_workspace as kbw
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
 
     monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path))
