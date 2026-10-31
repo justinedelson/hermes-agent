@@ -693,6 +693,9 @@ class _KanbanNotification:
         metadata: dict[str, Any] = dict(delivery_metadata) if isinstance(delivery_metadata, dict) else {}
         if sub.get("thread_id") and not metadata.get("thread_id"):
             metadata["thread_id"] = sub["thread_id"]
+        from gateway.kanban_notification_hooks import prepare_notification
+        self.notification_diagnostic = diagnostic_event(ev)
+        self.attention_text = await prepare_notification(self, ev)
         _send_res = None
         async def send_ping():
             nonlocal _send_res
@@ -707,8 +710,9 @@ class _KanbanNotification:
                     text = format_slack_ping(enriched, self)
                 else:
                     text = msg
+                text = (self.attention_text + "\n" if self.attention_text else "") + text
                 _send_res = await adapter.send(sub["chat_id"], text, metadata=metadata)
-        if not await present_notification(send_ping, platform=self.platform_str, diagnostic=diagnostic_event(ev)):
+        if not await present_notification(send_ping, platform=self.platform_str, diagnostic=self.notification_diagnostic):
             return False
         # SendResult(success=False) without an exception is a FAILED delivery
         # (else the event is lost); None / non-SendResult keeps the

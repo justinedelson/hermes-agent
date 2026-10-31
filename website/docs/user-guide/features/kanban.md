@@ -1325,7 +1325,7 @@ A subscription survives `done` (tasks can be reopened) and removes itself on `ar
 
 Slack subscriptions without an explicit conversation `thread_id` post one task card, then edit it
 in place with `chat.update` and append a one-line event history reply in its thread. The card shows
-the current title, status, ask, board/assignee/task context, links and a bounded UTC status trail,
+the current title, status, ask, board/assignee/task context, links and a bounded reader-local milestone trail,
 rebuilt from the task database at delivery time rather than from a queued event alone. The first
 post's exact timestamp is persisted as `delivery_metadata.thread_ts`; existing thread anchors
 are reused, including across gateway restarts. Unblock and archive events refresh the card too.
@@ -1337,6 +1337,29 @@ keep ordinary pings and never edit the conversation root. Integration authors ca
 cards by merging `{"kanban_card": false}` into the subscription's `delivery_metadata` through
 `kanban_db_notify.add_notify_sub`; this is metadata, not a CLI flag. Wake-only subscriptions,
 notification-suppression policy, and other platforms retain their existing delivery behavior.
+
+An optional notification plugin can separate live-card refreshes from attention signals. The local
+`kanban-slack-push` integration mentions its configured Slack member only for human gates and leaves
+ordinary card updates/history quiet. It accumulates activity into a durable, empty-skipping digest,
+with **need you / done / running / retried** sections linking to the exact Slack card roots. Its
+`kanban_slack_push` config and all cadence keys are documented in that plugin's module docstring;
+default slots are hourly 08:00–18:00 America/Los_Angeles plus a coalesced 18:00 end-of-day flush.
+This is plugin policy, not a change to creator wakes or an automatic deployment of the plugin.
+
+Integration authors have two additive hooks:
+
+- `kanban_notify_prepare`: called under subscriber scope before a passive send, with `task_id`,
+  `board`, `platform`, `event_id`, `event_kind`, `event_payload`, `task_title`, and `subscription`
+  copies. The first returned dictionary with string `attention_text` wins (bounded to 200 characters).
+  Optional boolean `diagnostic` classifies presentation for the suppression policy. An attention
+  prefix is added to the new root/history message, never persisted in an edited live card. Hook
+  failure is fail-open; it cannot veto the event or change wake evidence/checkpoint behavior.
+- `kanban_notify_tick`: runs under each served profile even when no new events exist. Its
+  `resolve_adapter(subscription)` callable rechecks subscription ownership and the exact route,
+  returning an authorized adapter or `None`. In-process consumers should use `ctx.spawn_task` for
+  slow delivery so the next human signal is not held behind a digest; unload cancels these tasks.
+  Callable/adapter access is not a plugin-host wire surface. `kanban_notify_delivered` remains an
+  observer after the successful passive-send checkpoint.
 
 **Discord threads under `profile_routes`:** when the gateway multiplexes profiles and routes a *channel*
 to a profile, a subscription created from the CLI for a *thread* in that channel needs the thread's route

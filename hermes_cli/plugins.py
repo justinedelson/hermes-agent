@@ -169,6 +169,13 @@ VALID_HOOKS: set[str] = {
     # ping after the durable ping checkpoint, off the delivery result path. Kwargs: task_id, board,
     # platform, chat_id, thread_id, event_id, event_kind, notifier_profile, message_id, delivery_metadata.
     "kanban_notify_delivered",
+    # Presentation extension: prepare runs under subscriber scope before each passive send.
+    # Kwargs: task_id, board, platform, event_id, event_kind, event_payload, task_title,
+    # subscription. First dict with attention_text: str wins; optional diagnostic: bool
+    # classifies presentation. Failures are fail-open; wake evidence is unchanged.
+    # tick runs per served profile even when no events exist; resolve_adapter(subscription)
+    # revalidates owner + route. Live callable: in-process plugins only.
+    "kanban_notify_prepare", "kanban_notify_tick",
     # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
     # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):
@@ -187,14 +194,6 @@ VALID_HOOKS: set[str] = {
     # gateway_platform_event: normalized envelopes only, never raw SDK objects or adapter handles.
     # Kwargs: platform, event_type, payload (event_type-local; see hooks.md). New event types land
     # only together with real fire-sites.
-    # on_kanban_dispatch_tick fires once per dispatcher tick in dispatch_once, strictly AFTER the board's
-    # single-writer dispatch lock has been released (the #56066 original fired inside the lock — the #64231
-    # disposition mandates the post-lock re-port), so a slow subscriber can never extend the writer critical
-    # section. Kwargs: board: str | None, profile_name: str, dry_run: bool, outcome: "ok" | "skipped_locked"
-    # | "idle", result: hermes_cli.kanban_db.DispatchResult (spawned, reclaimed, promoted,
-    # reconciled_orphans, crashed, stale, timed_out, auto_blocked, rate_limited, auto_assigned_default,
-    # respawn_guarded, skipped_per_profile_capped, skipped_unassigned, skipped_nonspawnable,
-    # skipped_locked). Privacy: result carries task ids, assignees, and workspace paths.
     # Gateway platform-boundary observer hooks (#64176). Observer-only; each callback isolated by
     # invoke_hook. This surface grants no adapter handles or platform actions. Fired today: Telegram
     # "reaction" + "message_edited"; Discord "message_edited", "message_deleted", "thread_created",

@@ -237,8 +237,12 @@ async def send_card_event(n, ev, metadata):
                              n.task_id, getattr(edited, "error", None))
         except Exception as exc:
             logger.exception("kanban Slack card update raised for %s: %s; delivering history", n.task_id, exc)
-        return await n.adapter.send(n.sub["chat_id"], format_history(ev), metadata=metadata)
-    result = await n.adapter.send(n.sub["chat_id"], card, metadata=metadata)
+        attention = getattr(n, "attention_text", "")
+        history = (attention + " " if attention else "") + format_history(ev)
+        return await n.adapter.send(n.sub["chat_id"], history, metadata=metadata)
+    attention = getattr(n, "attention_text", "")
+    text = (attention + "\n" if attention else "") + card
+    result = await n.adapter.send(n.sub["chat_id"], text, metadata=metadata)
     if getattr(result, "success", True) is not False and getattr(result, "message_id", None):
         metadata["thread_ts"] = result.message_id
         n.sub["delivery_metadata"] = dict(metadata)
