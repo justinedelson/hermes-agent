@@ -678,6 +678,12 @@ class _KanbanNotification:
                                notification_category="diagnostic" if self.wake_diagnostic else "result")
         self._log_woke()
 
+    def _uses_slack_card(self) -> bool:
+        """Explicit conversation threads and an opt-out keep legacy ping delivery."""
+        metadata = self.sub.get("delivery_metadata") or {}
+        return (self.platform_str == "slack" and not self.sub.get("thread_id")
+                and not metadata.get("thread_id") and metadata.get("kanban_card") is not False)
+
     async def _send_event(self, ev: Any, msg: str) -> bool:
         """Send one text ping; raises on adapter exception or SendResult(success=False)."""
         from gateway.warning_notifications import present_notification
@@ -689,7 +695,11 @@ class _KanbanNotification:
         _send_res = None
         async def send_ping():
             nonlocal _send_res
-            _send_res = await adapter.send(sub["chat_id"], msg, metadata=metadata)
+            if self._uses_slack_card():
+                from gateway.kanban_slack_card import send_card_event
+                _send_res = await send_card_event(self, ev, metadata)
+            else:
+                _send_res = await adapter.send(sub["chat_id"], msg, metadata=metadata)
         if not await present_notification(send_ping, platform=self.platform_str, diagnostic=diagnostic_event(ev)):
             return False
         # SendResult(success=False) without an exception is a FAILED delivery
@@ -718,6 +728,10 @@ class _KanbanNotification:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
         for ev in self.d["events"]:
             msg = self.format_event(ev)
+            if msg is None and self._uses_slack_card() and ev.kind in {"archived", "unblocked"}:
+                # A live card must clear old asks on unblock and show its final archived state.
+                from gateway.kanban_slack_card import format_history
+                msg = format_history(ev)
             if msg is None:
                 continue
             # Non-push adapters (api_server) always report SendResult(success=False)

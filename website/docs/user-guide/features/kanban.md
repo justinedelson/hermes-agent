@@ -1261,7 +1261,24 @@ hermes kanban notify-unsubscribe t_abcd \
     --platform telegram --chat-id 12345678 --thread-id 7
 ```
 
-A subscription removes itself automatically once the task reaches `done` or `archived`; no cleanup needed.
+A subscription survives `done` (tasks can be reopened) and removes itself on `archived`.
+
+### Slack live task cards
+
+Slack subscriptions without an explicit conversation `thread_id` post one task card, then edit it
+in place with `chat.update` and append a one-line event history reply in its thread. The card shows
+the current title, status, ask, board/assignee/task context, links and a bounded UTC status trail,
+rebuilt from the task database at delivery time rather than from a queued event alone. The first
+post's exact timestamp is persisted as `delivery_metadata.thread_ts`; existing thread anchors
+are reused, including across gateway restarts. Unblock and archive events refresh the card too.
+
+If an edit fails (for example, the root was deleted or cannot be edited), history still posts in
+the original thread; the notifier does not create a replacement channel card. A failed history
+send retains the normal retry/checkpoint behavior. Existing conversation-thread subscriptions
+keep ordinary pings and never edit the conversation root. Integration authors can opt out of
+cards by merging `{"kanban_card": false}` into the subscription's `delivery_metadata` through
+`kanban_db_notify.add_notify_sub`; this is metadata, not a CLI flag. Wake-only subscriptions,
+notification-suppression policy, and other platforms retain their existing delivery behavior.
 
 **Discord threads under `profile_routes`:** when the gateway multiplexes profiles and routes a *channel*
 to a profile, a subscription created from the CLI for a *thread* in that channel needs the thread's route
