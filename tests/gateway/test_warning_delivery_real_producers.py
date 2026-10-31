@@ -7,6 +7,22 @@ import pytest
 from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
 
+# The Discord admin-alert producer late-imports the runner's real profile scope.
+# Initialize process bootstrap during collection, before guarded fixture I/O.
+from gateway.run import _async_profile_runtime_scope
+from hermes_state_guard import _real_platform_state_root
+
+_REAL_HOME = _real_platform_state_root()
+
+
+@pytest.mark.parametrize("mode", ["r", "w"])
+def test_admin_alert_scope_import_keeps_real_home_manifest_guard(mode):
+    """Loading the real scope must not exempt install-parent state from the guard."""
+    assert callable(_async_profile_runtime_scope)
+    with pytest.raises(AssertionError, match="file I/O against the REAL hermes home"):
+        with (_REAL_HOME / "manifest.json").open(mode, encoding="utf-8"):
+            pytest.fail("the guard must refuse the open before any production-home I/O")
+
 
 @pytest.fixture(params=[None, False, True, "override"])
 def policy(request, monkeypatch, tmp_path):
