@@ -561,6 +561,29 @@ Live cards omit the Ask line when there is no action or when the extracted actio
 belongs to an agent, and show a single status chip plus action-first summary.
 Raw worker prose remains in the compact thread history; the board retains the full reason.
 
+Slack channel subscriptions use one live root per task. The first delivered event
+creates the root; **every later delivered state event edits it and posts exactly
+one single-line thread reply**, including claim, promotion, unblock, schedule and
+review reopen. These bookkeeping events never add creator wakes or legacy-ping
+noise. Sent-event checkpoints prevent repeat replies on a normal next tick or a
+wake retry; transport outcomes remain at-least-once if Slack accepted a post but
+its response/checkpoint was lost. A failed edit still sends history under the
+original root; a failed history send retries without replacing that root.
+
+Times use Slack local-time date tokens with America/Los_Angeles fallback text.
+Elapsed time is measured from the latest entry into the current state, without
+resetting on same-state events; the displayed duration is a snapshot at the last
+card refresh. The trail shows at most five first-visit milestones (creation plus
+the last four distinct milestones), omitting ready/todo/scheduled churn. Labels
+keep punctuation outside bold markup, so no invisible separator is needed.
+
+Set `dashboard.public_url` to enable task-ID links to
+`/kanban?board=<slug>&task=<id>` under that deployment's path prefix. Without a
+public URL the ID stays plain; recognized PR/Jira links remain available. The
+dashboard opens that exact board and task drawer. Per-task Slack `thread_ts`
+anchors do **not** inherit to children, while explicit conversation threads and
+routing/tenant metadata do. Existing subscriptions are not migrated by this change.
+
 `kanban_complete(summary=..., metadata={...})` is intentionally flexible:
 the summary is the human-readable closeout, and `metadata` is the
 machine-readable handoff that downstream agents, reviewers, or dashboards can

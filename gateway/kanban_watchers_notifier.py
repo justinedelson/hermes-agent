@@ -311,9 +311,11 @@ class _Collector:
         if _adapter_for_subscription(self.runner, Platform(platform), sub, owner_profile or self.notifier_profile) is None:
             _warn_anchorless_thread_sub_once(sub, platform)
             return None
+        from gateway.kanban_slack_card import CARD_KINDS, uses_slack_card
+        kinds = tuple(dict.fromkeys((*TERMINAL_KINDS, *CARD_KINDS))) if uses_slack_card(sub) else TERMINAL_KINDS
         old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
-            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+            thread_id=sub.get("thread_id") or "", kinds=kinds,
         )
         if not events:
             return None
@@ -680,9 +682,8 @@ class _KanbanNotification:
 
     def _uses_slack_card(self) -> bool:
         """Explicit conversation threads and an opt-out keep legacy ping delivery."""
-        metadata = self.sub.get("delivery_metadata") or {}
-        return (self.platform_str == "slack" and not self.sub.get("thread_id")
-                and not metadata.get("thread_id") and metadata.get("kanban_card") is not False)
+        from gateway.kanban_slack_card import uses_slack_card
+        return uses_slack_card(self.sub)
 
     async def _send_event(self, ev: Any, msg: str) -> bool:
         """Send one text ping; raises on adapter exception or SendResult(success=False)."""
@@ -735,10 +736,11 @@ class _KanbanNotification:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
         for ev in self.d["events"]:
             msg = self.format_event(ev)
-            if msg is None and self._uses_slack_card() and ev.kind in {"archived", "unblocked"}:
-                # A live card must clear old asks on unblock and show its final archived state.
-                from gateway.kanban_slack_card import format_history
-                msg = format_history(ev)
+            if msg is None and self._uses_slack_card():
+                # Card-only state events update + reply, but never add a creator wake.
+                from gateway.kanban_slack_card import CARD_KINDS, format_history
+                if ev.kind in CARD_KINDS:
+                    msg = format_history(ev)
             if msg is None:
                 continue
             # Non-push adapters (api_server) always report SendResult(success=False)

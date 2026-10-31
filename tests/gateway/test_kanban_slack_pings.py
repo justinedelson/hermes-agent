@@ -35,7 +35,7 @@ def test_completion_puts_outcome_before_title_and_context():
     assert lines[0] == "✔ *Completed — no action needed*"
     assert lines[1] == "*Ship the service*"
     assert lines[2] == "engineering · backend-engineer · task-example"
-    assert lines[3] == "*Details:\u200b* Deployed and verified."
+    assert lines[3] == "*Details*: Deployed and verified."
     assert n.wake_handoff == "Deployed and verified."
 
 
@@ -98,7 +98,7 @@ def test_context_extracts_links_before_details_clip_and_escapes_input():
     assert lines[1] == "*Deploy &lt;production&gt; &amp; verify*"
     assert "<https://github.com/example/services/pull/42|PR #42>" in lines[2]
     assert "<https://issues.example.com/browse/OPS-12|OPS-12>" in lines[2]
-    assert lines[3].startswith("*Details:\u200b* Approve ")
+    assert lines[3].startswith("*Details*: Approve ")
     assert lines[3].endswith("…")
     assert len(lines[3]) <= 172
 

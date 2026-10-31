@@ -1,7 +1,9 @@
 """Durable Slack task cards; subscription metadata owns the root, not process caches."""
 
 import logging
-from datetime import UTC, datetime
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from functools import partial
 from types import SimpleNamespace
 
@@ -15,30 +17,99 @@ _STATE_KINDS = {
     "claimed": "running", "promoted": "ready", "unblocked": "ready",
     "completed": "done", "review_requested": "review", "blocked": "blocked",
     "changes_requested": "ready", "block_loop_detected": "triage", "archived": "archived",
-    "gave_up": "blocked",
+    "gave_up": "blocked", "scheduled": "scheduled", "specified": "todo",
+    "review_reopened": "ready",
 }
+CARD_KINDS = (*_STATE_KINDS, "status", "created", "crashed", "timed_out", "reclaimed")
+_STATUS_HEADLINE_KINDS = {"claimed", "promoted", "created", "scheduled", "specified", "review_reopened", "reclaimed"}
+
+
+def uses_slack_card(sub):
+    """Conversation threads and explicit opt-outs never edit somebody else's root."""
+    metadata = sub.get("delivery_metadata") or {}
+    return (str(sub.get("platform") or "").lower() == "slack" and not sub.get("thread_id")
+            and not metadata.get("thread_id") and metadata.get("kanban_card") is not False)
+
+
+def _slack_time(epoch):
+    """Slack localizes the token; legacy clients get an unambiguous Pacific fallback."""
+    fallback = datetime.fromtimestamp(epoch, ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M %Z")
+    return f"<!date^{int(epoch)}^{{time}}|{fallback}>"
 
 
 def _event_status(ev):
     payload = ev.payload or {}
-    if ev.kind in {"crashed", "timed_out"}:
-        return payload.get("retry_status")
-    return payload.get("status") if ev.kind in {"status", "created"} else _STATE_KINDS.get(ev.kind)
+    if ev.kind in {"crashed", "timed_out", "reclaimed"}:
+        return payload.get("retry_status") or payload.get("status")
+    return payload.get("status") or _STATE_KINDS.get(ev.kind)
 
 
 def _snapshot(n):
     """Read current task and a bounded state trail from the same pinned board as the claim."""
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
 
-    kinds = (*_STATE_KINDS, "status", "created", "crashed", "timed_out", "gave_up")
+    kinds = CARD_KINDS
     with kb.pin_first_board_resolution(), kbc.connect_closing(board=n.board_slug) as conn:
         task = kb.get_task(conn, n.task_id)
         rows = conn.execute(
             "SELECT * FROM task_events WHERE task_id=? AND kind IN ("
-            + ",".join("?" for _ in kinds) + ") ORDER BY id DESC LIMIT 16",
+            + ",".join("?" for _ in kinds) + ") ORDER BY id",
             (n.task_id, *kinds),
-        ).fetchall()
-        return task, [kb.Event.from_row(row) for row in reversed(rows)]
+        )
+        return task, _compact_events(kb.Event.from_row(row) for row in rows)
+
+
+def _compact_events(events):
+    """Stream state-only rows; keep first milestones, latest payloads and latest entry times.
+
+    A fixed tail drops creation/long-lived state entry after enough retry churn.
+    Retention here scales with distinct states, not the number of runs or heartbeats.
+    """
+    first, latest, entries = {}, {}, {}
+    previous = None
+    for ev in events:
+        state = _event_status(ev)
+        if not state:
+            continue
+        first.setdefault("created" if ev.kind == "created" else state, ev)
+        latest[state] = ev
+        if state != previous:
+            entries[state] = ev
+        previous = state
+    retained = {ev.id: ev for group in (first, latest, entries) for ev in group.values()}
+    return [retained[key] for key in sorted(retained)]
+
+
+def _state_timing(task, events, now):
+    """Repeated same-state events do not reset the clock; re-entry does."""
+    since = getattr(task, "created_at", now)
+    for ev in reversed(events):
+        state = _event_status(ev)
+        if state and state != task.status:
+            break
+        if state:
+            since = ev.created_at
+    minutes = max(0, int(now - since)) // 60
+    if minutes < 60:
+        duration = f"{minutes}m"
+    elif minutes < 1440:
+        duration = f"{minutes // 60}h {minutes % 60}m"
+    else:
+        duration = f"{minutes // 1440}d {minutes % 1440 // 60}h"
+    return t("gateway.kanban.ping.slack.in_state", duration=duration, since=_slack_time(since))
+
+
+def _milestones(events):
+    """First visits only; scheduling churn is not a milestone. Keep creation + last four."""
+    milestones = {}
+    for ev in events:
+        state = "created" if ev.kind == "created" else _event_status(ev)
+        if state and state not in {"ready", "todo", "scheduled"}:
+            milestones.setdefault(state, ev.created_at)
+    entries = list(milestones.items())
+    if len(entries) > 5:
+        entries = entries[:1] + entries[-4:]
+    return " → ".join(f"{_escape(_safe(state, 24))} {_slack_time(epoch)}" for state, epoch in entries)
 
 
 def current_event(task, events):
@@ -46,9 +117,29 @@ def current_event(task, events):
     status = task.status if task else "unknown"
     current = next((ev for ev in reversed(events) if _event_status(ev) == status),
                    SimpleNamespace(kind="status", payload={"status": status}))
-    if current.kind in {"claimed", "promoted", "created"}:
+    if current.kind in _STATUS_HEADLINE_KINDS:
         current = SimpleNamespace(kind="status", payload={"status": status})
     return current
+
+
+def _task_link(n):
+    """Use the subscriber's declared public deployment, never guess a loopback URL."""
+    from urllib.parse import urlencode, urlsplit
+    from gateway.platforms._shared import get_scoped_secret
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.dashboard_auth.prefix import _normalise_public_url
+
+    config = load_user_config_effective()
+    dashboard = config.get("dashboard") or {}
+    raw = get_scoped_secret("HERMES_DASHBOARD_PUBLIC_URL", "") or dashboard.get("public_url", "")
+    base = _normalise_public_url(raw)
+    if not base:
+        return _escape(n.task_id)
+    parsed = urlsplit(base)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or "|" in base:
+        return _escape(n.task_id)
+    query = urlencode({"board": n.board_slug or "default", "task": n.task_id})
+    return f"<{_escape(base + '/kanban?' + query)}|{_escape(n.task_id)}>"
 
 
 def format_card(n, task, events, current=None):
@@ -71,19 +162,12 @@ def format_card(n, task, events, current=None):
     headline = t("gateway.kanban.ping.slack." + key)
     if current.kind in {"crashed", "timed_out", "gave_up"} or (event_audience(current) == "agent" and payload.get("ask")):
         headline = _headline(current)
-    trail = []
-    last_status = None
-    for ev in events:
-        state = _event_status(ev)
-        if not state or state == last_status:
-            continue
-        timestamp = datetime.fromtimestamp(ev.created_at, UTC).strftime("%H:%M")
-        trail.append(f"{_escape(_safe(state, 24))} {timestamp}")
-        last_status = state
     return "\n".join([
-        lines[1], f"[{_escape(_safe(status, 24)).upper()}] {headline}",
-        *ask_line, lines[2], *detail_line,
-        t("gateway.kanban.ping.slack.trail", value=" → ".join(trail[-8:])),
+        t("gateway.kanban.ping.slack.card_title", value=_escape(_safe(context.title, 120))),
+        f"[{_escape(_safe(status, 24)).upper()}] {headline}",
+        *([_state_timing(task, events, time.time())] if task else []),
+        *ask_line, lines[2].replace(_escape(n.task_id), _task_link(n), 1), *detail_line,
+        t("gateway.kanban.ping.slack.trail", value=_milestones(events)),
     ])
 
 
@@ -91,8 +175,11 @@ def format_history(ev):
     """One line per delivered event, without repeating the whole card."""
     payload = ev.payload or {}
     detail = payload.get("reason") or payload.get("summary") or payload.get("error") or payload.get("ask")
-    timestamp = datetime.fromtimestamp(ev.created_at, UTC).strftime("%H:%M")
-    text = f"{timestamp} UTC · {_headline(ev)}"
+    timestamp = _slack_time(ev.created_at)
+    headline_event = ev
+    if ev.kind in _STATUS_HEADLINE_KINDS:
+        headline_event = SimpleNamespace(kind="status", payload={"status": _event_status(ev)})
+    text = f"{timestamp} · {_headline(headline_event)}"
     if detail:
         text += " · " + _escape(_safe(detail))
     return text

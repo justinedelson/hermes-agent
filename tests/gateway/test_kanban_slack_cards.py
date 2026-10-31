@@ -65,6 +65,127 @@ async def deliver(runner, rows):
         await _KanbanNotification(runner, row, platform_cls=Platform, sub_fail_counts={}).deliver()
 
 
+def test_card_times_are_slack_local_tokens_with_pacific_fallback(tmp_path, monkeypatch):
+    runner, client, task_id = setup(tmp_path, monkeypatch, {"thread_ts": "100.000001"})
+    change(task_id, "blocked", ask="Choose a region", audience="human")
+    with kbc.connect() as conn:
+        conn.execute("UPDATE task_events SET created_at=1793468577 WHERE task_id=?", (task_id,))
+        conn.commit()
+    asyncio.run(deliver(runner, collect(runner)))
+    for _, kwargs in client.calls:
+        assert "<!date^1793468577^{time}|2026-10-31 10:42 PDT>" in kwargs["text"]
+        assert "UTC" not in kwargs["text"]
+
+
+def test_card_labels_and_punctuated_titles_have_no_invisible_chars(tmp_path, monkeypatch):
+    runner, client, task_id = setup(tmp_path, monkeypatch, {"thread_ts": "100.000001"})
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET title='Build (proposal E)' WHERE id=?", (task_id,))
+        conn.commit()
+    change(task_id, "blocked", ask="Choose a region?", audience="human", why="Needs input.")
+    asyncio.run(deliver(runner, collect(runner)))
+    card = client.calls[0][1]["text"]
+    assert "\u200b" not in card
+    assert "*Ask*: Choose a region?" in card
+    assert "*Details*: Needs input." in card
+    assert "*Status trail*:" in card
+    assert card.startswith("*Task*: Build (proposal E)\n")
+
+
+def test_trail_collapses_churn_and_reports_continuous_time_in_state(tmp_path, monkeypatch):
+    runner, client, task_id = setup(tmp_path, monkeypatch, {"thread_ts": "100.000001"})
+    monkeypatch.setattr("time.time", lambda: 1793468577 + 6000)
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET created_at=1793468577 WHERE id=?", (task_id,))
+        conn.execute("UPDATE task_events SET created_at=1793468577 WHERE task_id=?", (task_id,))
+        for i, state in enumerate(["running", "blocked", "ready"] * 10 + ["running", "review", "done", "done"]):
+            kb._append_event(conn, task_id, "status", {"status": state})
+            conn.execute("UPDATE task_events SET created_at=? WHERE id=(SELECT MAX(id) FROM task_events)",
+                         (1793468577 + (i + 1) * 100,))
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (task_id,))
+        conn.commit()
+    asyncio.run(deliver(runner, collect(runner)))
+    card = client.calls[0][1]["text"]
+    assert "*In state*: 45m · since <!date^1793471877^{time}|" in card
+    trail = card.split("*Status trail*: ", 1)[1]
+    assert [entry.split(" ", 1)[0] for entry in trail.split(" → ")] == ["created", "running", "blocked", "review", "done"]
+    assert "<!date^1793468577^{time}|" in trail
+
+
+@pytest.mark.parametrize("metadata,thread_id", [({}, ""), ({"kanban_card": False}, ""), ({}, "100.123456")])
+def test_claim_and_promotion_refresh_cards_once_without_waking_or_legacy_noise(tmp_path, monkeypatch, metadata, thread_id):
+    runner, client, task_id = setup(tmp_path, monkeypatch, metadata, thread_id)
+    change(task_id, "blocked")
+    asyncio.run(deliver(runner, collect(runner)))
+    client.calls.clear()
+    with kbc.connect() as conn:
+        kb.unblock_task(conn, task_id)
+        kb.claim_task(conn, task_id, claimer="test-claim", ttl_seconds=300)
+    asyncio.run(deliver(runner, collect(runner)))
+    is_card = not thread_id and metadata.get("kanban_card") is not False
+    assert [method for method, _ in client.calls] == (["update", "post", "update", "post"] if is_card else [])
+    if is_card:
+        assert "Unblocked" in client.calls[1][1]["text"]
+        assert "Status → running" in client.calls[3][1]["text"]
+        assert "[RUNNING]" in client.calls[2][1]["text"]
+    assert not collect(runner)
+    if is_card:
+        with kbc.connect() as conn:
+            conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (task_id,))
+            kb.recompute_ready(conn)
+        client.calls.clear()
+        asyncio.run(deliver(runner, collect(runner)))
+        assert [method for method, _ in client.calls] == ["update", "post"]
+        assert "Status → ready" in client.calls[1][1]["text"]
+
+
+@pytest.mark.parametrize("kind,payload,status", [
+    ("unblocked", {"status": "review", "resume_status": "review"}, "review"),
+    ("changes_requested", {"status": "todo", "implementer": "worker"}, "todo"),
+    ("scheduled", {}, "scheduled"), ("specified", {}, "todo"),
+    ("review_reopened", {}, "ready"), ("reclaimed", {"retry_status": "review"}, "review"),
+])
+def test_other_state_changes_refresh_once_and_use_persisted_landing_state(tmp_path, monkeypatch, kind, payload, status):
+    runner, client, task_id = setup(tmp_path, monkeypatch, {"thread_ts": "100.000001"})
+    change(task_id, "running")
+    asyncio.run(deliver(runner, collect(runner)))
+    client.calls.clear()
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
+        kb._append_event(conn, task_id, kind, payload)
+        conn.execute("UPDATE task_events SET created_at=1793468577 WHERE task_id=? AND kind=?", (task_id, kind))
+        conn.commit()
+    asyncio.run(deliver(runner, collect(runner)))
+    assert [method for method, _ in client.calls] == ["update", "post"]
+    card = client.calls[0][1]["text"]
+    assert f"[{status.upper()}]" in card
+    assert "since <!date^1793468577^{time}|" in card
+    assert "gateway.kanban" not in client.calls[1][1]["text"]
+    assert not collect(runner)
+
+
+@pytest.mark.parametrize("public_url", ["https://dashboard.example.test/hermes/", ""])
+def test_card_links_use_configured_dashboard_and_keep_pr_jira_references(tmp_path, monkeypatch, public_url):
+    from hermes_constants import get_hermes_home
+    runner, client, task_id = setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+    (get_hermes_home() / "config.yaml").write_text(f"dashboard:\n  public_url: '{public_url}'\n", encoding="utf-8")
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET body=? WHERE id=?", (
+            "Work https://github.com/example/services/pull/42 and https://jira.example.test/browse/APP-123", task_id))
+        conn.commit()
+    change(task_id, "running")
+    asyncio.run(deliver(runner, collect(runner)))
+    card = client.calls[0][1]["text"]
+    if public_url:
+        assert f"<https://dashboard.example.test/hermes/kanban?board=default&amp;task={task_id}|{task_id}>" in card
+    else:
+        assert f"worker · {task_id}" in card
+        assert "kanban?" not in card
+    assert "<https://github.com/example/services/pull/42|PR #42>" in card
+    assert "<https://jira.example.test/browse/APP-123|APP-123>" in card
+
+
 def test_batch_posts_one_card_then_edits_and_replies_from_current_state(tmp_path, monkeypatch):
     runner, client, task_id = setup(tmp_path, monkeypatch, {"scope_id": "T123"})
     change(task_id, "review")
@@ -79,7 +200,7 @@ def test_batch_posts_one_card_then_edits_and_replies_from_current_state(tmp_path
     root = "100.000001"
     first = client.calls[0][1]
     assert "thread_ts" not in first
-    assert first["text"].startswith("*Current title*\n")
+    assert first["text"].startswith("*Task*: Current title\n")
     assert "[DONE]" in first["text"]
     assert "Choose a region" not in first["text"]
     for method, kwargs in client.calls[1:]:

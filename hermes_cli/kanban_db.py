@@ -1365,15 +1365,12 @@ def _inherit_notify_subs(
     conn: sqlite3.Connection, child_id: str, parents: Iterable[str], *,
     created_at: Optional[int] = None,
 ) -> None:
-    """Copy parents' notify subscriptions to a child, cursor caught up to the
-    child's current event so a late ``link_tasks`` never replays history.
+    """Copy parent subscriptions, caught up to the child's cursor (no history replay).
 
-    Single owner of inheritance (create_task, link_tasks, decompose). It must
-    copy EVERY routing/delivery column: dropping ``chat_type`` made DM-originated
-    completions wake a fresh group session instead of the originating DM.
-
-    Omitting columns here silently degrades routing: a DM-originated child completion falls back to
-    chat_type='group' and wakes a fresh group-scoped session instead of the originating DM (issue #73030).
+    Shared by create/link/decompose: copy every routing/delivery column or DM
+    completions wake a fresh group session and Telegram topic fallbacks are lost.
+    Slack ``thread_ts`` owns a task's live card, not routing: never inherit it.
+    Explicit conversation ``thread_id`` and tenant/routing metadata still inherit.
     """
     parent_ids = tuple(dict.fromkeys(p for p in parents if p))
     if not parent_ids:
@@ -1391,7 +1388,10 @@ def _inherit_notify_subs(
              created_at, last_event_id)
         SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
                COALESCE(chat_type, 'dm'), notifier_profile,
-               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
+               COALESCE(delivery_mode, 'notify'),
+               CASE WHEN platform = 'slack' AND json_valid(delivery_metadata)
+                    THEN json_remove(delivery_metadata, '$.thread_ts')
+                    ELSE delivery_metadata END, ?, ?
           FROM kanban_notify_subs
          WHERE task_id IN ({placeholders})
         """,

@@ -1015,6 +1015,33 @@ def _assert_full_inherited_sub(subs):
         "delivery_metadata dropped during inheritance (issue #73030)"
     )
 
+@pytest.mark.parametrize("link_later", [False, True])
+@pytest.mark.parametrize("thread_id", ["", "100.111111"])
+def test_children_inherit_slack_routing_but_not_parent_card_anchor(kanban_home, link_later, thread_id):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="Parent", assignee="worker")
+        metadata = {"thread_ts": "100.222222", "scope_id": "T123", "parent_chat_id": "C123", "kanban_card": True}
+        kbn.add_notify_sub(conn, task_id=parent, platform="slack", chat_id="C123", thread_id=thread_id,
+                           chat_type="channel", user_id="U123", notifier_profile="default",
+                           delivery_mode="notify+wake", delivery_metadata=metadata)
+        child = kb.create_task(conn, title="Child", assignee="worker", parents=() if link_later else [parent])
+        if link_later:
+            kb.link_tasks(conn, parent, child)
+        sub = kbn.list_notify_subs(conn, child)[0]
+        assert sub["delivery_metadata"] == {key: value for key, value in metadata.items() if key != "thread_ts"}
+        assert sub["thread_id"] == thread_id
+        assert sub["chat_type"] == "channel"
+        assert sub["user_id"] == "U123"
+        assert sub["notifier_profile"] == "default"
+        assert sub["delivery_mode"] == "notify+wake"
+        assert kbn.list_notify_subs(conn, parent)[0]["delivery_metadata"] == metadata
+        # Linking again never erases the child's OWN anchor.
+        kbn.add_notify_sub(conn, task_id=child, platform="slack", chat_id="C123", thread_id=thread_id,
+                           delivery_metadata={"thread_ts": "100.333333"})
+        kb.link_tasks(conn, parent, child)
+        assert kbn.list_notify_subs(conn, child)[0]["delivery_metadata"]["thread_ts"] == "100.333333"
+
+
 def test_link_tasks_inherits_all_routing_columns(kanban_home):
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc

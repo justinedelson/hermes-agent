@@ -28,7 +28,7 @@ def test_agent_fallback_does_not_request_human_action():
 
 def test_human_action_is_displayed_without_raw_evidence():
     text = render("blocked", {"reason": "Many technical details", "ask": "Choose a region", "audience": "human"})
-    assert "Ask:** Choose a region" in text
+    assert "**Ask**: Choose a region" in text
     assert "Many technical details" not in text
 
 
