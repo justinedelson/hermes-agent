@@ -1105,10 +1105,15 @@ def _processes_with_hermes_home_under(roots) -> list[int]:
 
     Linux only (``/proc/<pid>/environ``; unreadable entries are another user's and skipped).
     Elsewhere the scan is empty: a test-spawned daemon there is the per-test guard's problem.
+    Roots are trusted session paths. Only their lexical and canonical spellings
+    qualify for resolution: arbitrary external symlink aliases are not session ownership.
+    Contained symlinks still require canonical containment before a PID is selected.
     """
-    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+    roots = [Path(r) for r in roots if r]
+    if not roots or not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
         return []
-    resolved = [Path(r).resolve() for r in roots if r]
+    resolved = [root.resolve() for root in roots]
+    candidates = roots + resolved
     found = []
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
@@ -1121,8 +1126,13 @@ def _processes_with_hermes_home_under(roots) -> list[int]:
         home = next((item[12:] for item in environ if item.startswith(b"HERMES_HOME=")), None)
         if not home:
             continue
+        path = Path(os.fsdecode(home))
+        # Environment bytes are untrusted. Pure component checks must precede metadata I/O.
+        if (not path.is_absolute() or ".." in path.parts
+                or not any(path.is_relative_to(root) for root in candidates)):
+            continue
         try:
-            path = Path(os.fsdecode(home)).resolve()
+            path = path.resolve()
         except (OSError, ValueError):
             continue
         if any(path == root or path.is_relative_to(root) for root in resolved):
