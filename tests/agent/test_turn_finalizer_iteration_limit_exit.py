@@ -5,7 +5,24 @@ from unittest.mock import ANY, MagicMock
 
 import pytest
 
+# finalize_turn resolves the conversation-loop logger lazily to avoid an import cycle.
+# Initialize that real consumer at collection: process bootstrap discovers the install
+# from the checkout, independently of the per-test temporary HERMES_HOME.
+from agent import conversation_loop
 from agent.turn_finalizer import finalize_turn
+from hermes_state_guard import _real_platform_state_root
+
+_REAL_HOME = _real_platform_state_root()
+
+
+@pytest.mark.parametrize("mode", ["r", "w"])
+def test_finalizer_import_keeps_real_home_manifest_guard(mode):
+    """Collection initialization must not allow runtime I/O into install-parent state."""
+    assert callable(conversation_loop.run_conversation)
+    assert _REAL_HOME is not None
+    with pytest.raises(AssertionError, match="file I/O against the REAL hermes home"):
+        with (_REAL_HOME / "manifest.json").open(mode, encoding="utf-8"):
+            pytest.fail("the guard must refuse the open before production-home I/O")
 
 
 class _LimitAgent:

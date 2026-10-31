@@ -16,11 +16,27 @@ from pathlib import Path
 
 import pytest
 
+# The watcher tests need the real runner, whose process bootstrap discovers its
+# install from the checkout. Initialize it at collection, before fixture home guards.
+from gateway.run import GatewayRunner
+from hermes_state_guard import _real_platform_state_root
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
+
+_REAL_HOME = _real_platform_state_root()
+
+
+@pytest.mark.parametrize("mode", ["r", "w"])
+def test_dispatcher_import_keeps_real_home_manifest_guard(mode):
+    """Collection initialization must not exempt install-parent state from runtime guards."""
+    assert callable(GatewayRunner._kanban_dispatcher_watcher)
+    assert _REAL_HOME is not None
+    with pytest.raises(AssertionError, match="file I/O against the REAL hermes home"):
+        with (_REAL_HOME / "manifest.json").open(mode, encoding="utf-8"):
+            pytest.fail("the guard must refuse the open before production-home I/O")
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +964,6 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     import logging
     import sqlite3
 
-    from gateway.run import GatewayRunner
     import hermes_cli.config as _cfg_mod
     import hermes_cli.kanban_db as _kb
     from hermes_cli import kanban_db_connect as _kbc
