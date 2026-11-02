@@ -315,4 +315,3 @@ def test_frozen_handoff_survives_verifier_optout_and_warning_stops_for_override(
     load_config()
     dispatch.dispatch_once(conn, dry_run=True)
     assert "does not inherit" not in caplog.text
-
