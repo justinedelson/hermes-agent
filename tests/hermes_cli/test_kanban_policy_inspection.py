@@ -6,7 +6,10 @@ import sqlite3
 import pytest
 
 from hermes_cli import kanban_db as kb
-from tests.hermes_cli.test_kanban_board_verification_policy import board, _cli
+from tests.hermes_cli import test_kanban_board_verification_policy as policy_tests
+
+board = policy_tests.board
+_cli = policy_tests._cli
 
 
 def test_corrupt_board_diagnostic_does_not_break_config_load(board, monkeypatch, tmp_path, caplog):
