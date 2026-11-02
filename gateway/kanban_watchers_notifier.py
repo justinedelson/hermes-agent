@@ -715,6 +715,10 @@ class _KanbanNotification:
         # "no exception == delivered" contract.
         if getattr(_send_res, "success", True) is False:
             raise RuntimeError(f"adapter send() reported failure: {getattr(_send_res, 'error', None) or 'unknown error'}")
+        # Platform message id of the ping just sent (first id when split), for the
+        # kanban_notify_delivered observer hook.
+        _extra = tuple(getattr(_send_res, "continuation_message_ids", None) or ())
+        self.last_message_id = (_extra[0] if _extra else getattr(_send_res, "message_id", None)) or None
         logger.debug("kanban notifier: delivered %s event for %s to %s/%s on board %s",
                      ev.kind, self.task_id, self.platform_str, sub["chat_id"], self.board_slug)
         # Upload artifact paths from the handoff payload / legacy result as
@@ -759,12 +763,29 @@ class _KanbanNotification:
             if ev.id <= self.sub.get("last_ping_event_id", 0):
                 continue
             try:
+                self.last_message_id = None
                 if await self._send_event(ev, msg) is False:
                     continue
                 await _to_thread_process_service(partial(
                     self.runner._kanban_sub_op, self.board_slug, "record_notify_ping", self.sub,
                     event_id=ev.id,
                 ))
+                # Observer hook (kanban_notify_delivered): lets plugins thread-anchor
+                # the subscription to the message just sent, without the notifier
+                # knowing about threads. Failures must not affect delivery state.
+                try:
+                    from hermes_cli.lifecycle import ainvoke_hook
+                    await ainvoke_hook("kanban_notify_delivered", task_id=self.task_id,
+                                       board=self.board_slug, platform=self.platform_str,
+                                       chat_id=self.sub.get("chat_id"),
+                                       thread_id=self.sub.get("thread_id") or None,
+                                       event_id=ev.id, event_kind=ev.kind,
+                                       notifier_profile=self.sub_profile or None,
+                                       message_id=getattr(self, "last_message_id", None),
+                                       delivery_metadata=dict(self.sub.get("delivery_metadata") or {}))
+                except Exception:  # health: allow BLE001 -- observer hook must not affect delivery state; traceback logged above
+                    logger.debug("kanban notifier: kanban_notify_delivered hook failed for %s",
+                                 self.task_id, exc_info=True)
                 self.clear_failures()
             except Exception as exc:
                 await self.delivery_failed(
