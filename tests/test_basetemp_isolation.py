@@ -46,8 +46,7 @@ def test_basetemp_inside_the_native_home_is_relocated_outside_it(tmp_path, monke
     # One shared, prunable root (never a loose dir in the operator's $HOME) and gone when
     # this pytest exits; a run killed before that is swept as soon as the root is idle.
     assert relocated.parent.name == "hermes-pytest" and relocated.parent != Path.home()
-    # Exercise relocation cleanup, not the separate session process reaper.
-    suite_conftest._remove_relocated_basetemp(config)
+    suite_conftest.pytest_unconfigure(config)
     assert not relocated.exists()
     # The sandbox derived from it no longer resolves to the native root.
     monkeypatch.setenv("HERMES_HOME", str(relocated / "t0" / "hermes_test"))
