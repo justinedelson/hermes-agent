@@ -157,7 +157,3 @@ def test_external_ping_redacts_secrets_and_url_credentials():
     assert text is not None
     assert token not in text
     assert "password123" not in text
-
-
-
-
