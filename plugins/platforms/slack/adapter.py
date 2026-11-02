@@ -2254,7 +2254,9 @@ class SlackAdapter(BasePlatformAdapter):
                 # stay stuck on "is thinking..." (#24117).
                 return SendResult(success=True)
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
-            last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts)
+            last_result = await self._post_chunks(
+                chat_id, team_id, content, formatted, thread_ts,
+                blocks=(metadata or {}).get("blocks"))
             # Clear Slack Assistant status as soon as the final message is posted.
             if thread_ts:
                 await self.stop_typing(chat_id, metadata=metadata)
@@ -2282,7 +2284,8 @@ class SlackAdapter(BasePlatformAdapter):
                 retry_after=self._retry_after_from_exc(e) if _retryable else None)
 
     async def _post_chunks(
-        self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str]
+        self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str],
+        *, blocks: Optional[list] = None,
     ) -> Any:
         """``chat.postMessage`` each ``MAX_MESSAGE_LENGTH`` chunk; returns the last response.
         Block Kit only for single-chunk messages (a >39k response is pathological for the 50-block /
@@ -2290,7 +2293,7 @@ class SlackAdapter(BasePlatformAdapter):
         ``reply_broadcast`` only the first chunk is also posted to the main channel."""
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         broadcast = self.config.extra.get("reply_broadcast", False)
-        blocks = self._maybe_blocks(content) if len(chunks) == 1 else None
+        blocks = (sanitize_blocks(blocks) if blocks is not None else self._maybe_blocks(content)) if len(chunks) == 1 else None
         last_result = None
         for i, chunk in enumerate(chunks):
             kwargs = {
@@ -2410,9 +2413,12 @@ class SlackAdapter(BasePlatformAdapter):
             # Block Kit only on the FINAL edit: re-deriving a layout on every streaming flush
             # would be wasteful and jittery. ``text`` is the fallback either way.
             if finalize:
-                blocks = self._maybe_blocks(content)
+                explicit_blocks = (metadata or {}).get("blocks")
+                blocks = sanitize_blocks(explicit_blocks) if explicit_blocks is not None else self._maybe_blocks(content)
                 if blocks:
                     update_kwargs["blocks"] = blocks
+                elif explicit_blocks is not None:
+                    update_kwargs["blocks"] = []
             await self._call_with_block_fallback(
                 lambda: self._client_for(chat_id, metadata), "chat_update", update_kwargs, "edit")
             if finalize:

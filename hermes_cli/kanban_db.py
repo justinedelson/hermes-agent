@@ -3539,11 +3539,11 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, allow_nested: bool = False) -> bool:
+    """Resume blocked/scheduled, re-gating parents/review and closing leaked runs.
+    ``allow_nested`` composes guarded UI receipts; no post-commit side effects."""
     now = int(time.time())
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=allow_nested):
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if _task_status(conn, task_id) == "blocked"

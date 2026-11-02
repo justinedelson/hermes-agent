@@ -175,7 +175,7 @@ VALID_HOOKS: set[str] = {
     # classifies presentation. Failures are fail-open; wake evidence is unchanged.
     # tick runs per served profile even when no events exist; resolve_adapter(subscription)
     # revalidates owner + route. Live callable: in-process plugins only.
-    "kanban_notify_prepare", "kanban_notify_tick",
+    "kanban_notify_prepare", "kanban_notify_tick", "kanban_card_render",
     # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
     # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):

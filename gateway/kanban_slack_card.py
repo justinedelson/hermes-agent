@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent.i18n import t
@@ -20,7 +21,7 @@ _STATE_KINDS = {
     "gave_up": "blocked", "scheduled": "scheduled", "specified": "todo",
     "review_reopened": "ready",
 }
-CARD_KINDS = (*_STATE_KINDS, "status", "created", "crashed", "timed_out", "reclaimed")
+CARD_KINDS = (*_STATE_KINDS, "status", "created", "crashed", "timed_out", "reclaimed", "commented")
 _STATUS_HEADLINE_KINDS = {"claimed", "promoted", "created", "scheduled", "specified", "review_reopened", "reclaimed"}
 _RETRY_KINDS = {"crashed", "timed_out", "gave_up", "reclaimed"}
 
@@ -85,6 +86,8 @@ def _snapshot(n):
 
     kinds = CARD_KINDS
     with kb.pin_first_board_resolution(), kbc.connect_closing(board=n.board_slug) as conn:
+        conn.execute("BEGIN")
+        n.card_db_path = str(Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve())
         task = kb.get_task(conn, n.task_id)
         rows = conn.execute(
             "SELECT * FROM task_events WHERE task_id=? AND kind IN ("
@@ -211,6 +214,8 @@ def format_history(ev):
     payload = ev.payload or {}
     detail = payload.get("reason") or payload.get("summary") or payload.get("error") or payload.get("ask")
     timestamp = _slack_time(ev.created_at)
+    if ev.kind == "commented":
+        return timestamp + " · " + t("gateway.kanban.ping.slack.commented", author=_escape(_safe(payload.get("author"), 80)))
     headline_event = ev
     if ev.kind in _STATUS_HEADLINE_KINDS:
         headline_event = SimpleNamespace(kind="status", payload={"status": _event_status(ev)})
@@ -224,6 +229,7 @@ async def send_card_event(n, ev, metadata):
     """Post the first root, then edit + reply; persist the root before the next event in a batch."""
     from gateway.kanban_watchers_common import _to_thread_process_service
     from gateway.kanban_notify_summarizer import enrich_event
+    from gateway.kanban_notification_hooks import card_metadata
 
     task, events = await _to_thread_process_service(_snapshot, n)
     current = await enrich_event(current_event(task, events), board=n.board_slug)
@@ -231,7 +237,8 @@ async def send_card_event(n, ev, metadata):
     root = metadata.get("thread_ts")
     if root:
         try:
-            edited = await n.adapter.edit_message(n.sub["chat_id"], str(root), card, finalize=True, metadata=metadata)
+            layout = await card_metadata(n, ev, card, metadata, task, events)
+            edited = await n.adapter.edit_message(n.sub["chat_id"], str(root), card, finalize=True, metadata=layout)
             if getattr(edited, "success", True) is False:
                 logger.debug("kanban Slack card update failed for %s: %s; delivering history",
                              n.task_id, getattr(edited, "error", None))
@@ -242,7 +249,8 @@ async def send_card_event(n, ev, metadata):
         return await n.adapter.send(n.sub["chat_id"], history, metadata=metadata)
     attention = getattr(n, "attention_text", "")
     text = (attention + "\n" if attention else "") + card
-    result = await n.adapter.send(n.sub["chat_id"], text, metadata=metadata)
+    layout = await card_metadata(n, ev, text, metadata, task, events)
+    result = await n.adapter.send(n.sub["chat_id"], text, metadata=layout)
     if getattr(result, "success", True) is not False and getattr(result, "message_id", None):
         metadata["thread_ts"] = result.message_id
         n.sub["delivery_metadata"] = dict(metadata)

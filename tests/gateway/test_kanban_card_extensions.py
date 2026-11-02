@@ -1,0 +1,50 @@
+"""Card extensions reach the real adapter without decorating history or durable routes."""
+import asyncio
+
+from hermes_cli import lifecycle, kanban_db_connect as kbc
+from tests.gateway.test_kanban_slack_cards import setup, change, collect, deliver
+
+
+BLOCKS = [{"type": "actions", "elements": [{
+    "type": "button", "text": {"type": "plain_text", "text": "Comment…"},
+    "action_id": "example_comment", "value": "opaque",
+}]}]
+
+
+def test_card_blocks_reach_root_and_edit_but_not_history_or_subscription(tmp_path, monkeypatch):
+    runner, client, task_id = setup(tmp_path, monkeypatch)
+
+    async def hook(name, **kwargs):
+        if name == "kanban_card_render":
+            assert kwargs["adapter"] is runner.adapters[next(iter(runner.adapters))]
+            assert kwargs["subscription"]["task_id"] == task_id
+            return [{"blocks": BLOCKS}]
+        return []
+
+    monkeypatch.setattr(lifecycle, "ainvoke_hook", hook)
+    change(task_id, "running")
+    asyncio.run(deliver(runner, collect(runner)))
+    assert client.calls[0][1].get("blocks") == BLOCKS
+    change(task_id, "blocked")
+    asyncio.run(deliver(runner, collect(runner)))
+    assert client.calls[1][1].get("blocks") == BLOCKS
+    assert "blocks" not in client.calls[2][1]
+    with kbc.connect() as conn:
+        metadata = conn.execute("SELECT delivery_metadata FROM kanban_notify_subs").fetchone()[0]
+    assert "blocks" not in metadata
+    assert not collect(runner)
+
+
+def test_broken_card_extension_preserves_delivery(tmp_path, monkeypatch):
+    runner, client, task_id = setup(tmp_path, monkeypatch)
+
+    async def hook(name, **kwargs):
+        if name == "kanban_card_render":
+            raise RuntimeError("broken extension")
+        return []
+
+    monkeypatch.setattr(lifecycle, "ainvoke_hook", hook)
+    change(task_id, "running")
+    asyncio.run(deliver(runner, collect(runner)))
+    assert len(client.calls) == 1
+    assert not collect(runner)

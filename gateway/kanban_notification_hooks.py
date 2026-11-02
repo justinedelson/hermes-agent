@@ -6,6 +6,24 @@ from functools import partial
 logger = logging.getLogger(__name__)
 
 
+async def card_metadata(n, ev, text, metadata, task, events):
+    """Transient card layout only; never persist blocks or attach them to history."""
+    from hermes_cli.lifecycle import ainvoke_hook
+    try:
+        results = await ainvoke_hook(
+            "kanban_card_render", task_id=n.task_id, board=n.board_slug,
+            event_id=ev.id, subscription=copy.deepcopy(n.sub), text=text,
+            adapter=n.adapter, task=copy.deepcopy(task), events=copy.deepcopy(events),
+            db_path=n.card_db_path,
+        )
+        for result in results:
+            if isinstance(result, dict) and isinstance(result.get("blocks"), list):
+                return {**metadata, "blocks": result["blocks"]}
+    except Exception:
+        logger.exception("Kanban card render hook failed for %s", n.task_id)
+    return metadata
+
+
 async def prepare_notification(n, ev):
     """First valid attention_text wins; presentation failures never veto delivery."""
     from hermes_cli.lifecycle import ainvoke_hook

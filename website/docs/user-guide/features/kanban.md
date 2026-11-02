@@ -570,6 +570,25 @@ wake retry; transport outcomes remain at-least-once if Slack accepted a post but
 its response/checkpoint was lost. A failed edit still sends history under the
 original root; a failed history send retries without replacing that root.
 
+Comments on live-card subscriptions also refresh the root and receive one
+checkpointed “Comment added by …” history reply. Comment contents stay on the
+board; explicit conversation-thread subscriptions retain their existing behavior.
+
+In-process plugins may register `kanban_card_render` to add transient Block Kit
+layouts. It receives the displayed `task`/`events` snapshot and its physical
+`db_path`, plus `task_id`, `board`, delivery `event_id`, `subscription`, `text`, and
+the authorized live `adapter`. The first `{blocks: [...]}` result wins. A hook
+failure preserves plain-text delivery. Blocks travel only on the root send/edit,
+never in persisted subscription metadata or history replies. The Slack adapter
+accepts explicit `metadata.blocks` on sends and final edits (an empty list clears
+an edited layout). Plugins use `ctx.register_platform_handler("slack", factory)`
+for Socket Mode actions and modal submissions; the host adds no HTTP endpoint.
+Authorization and stale-target checks belong to the plugin, not button values.
+
+Guarded integrations can call `unblock_task(..., allow_nested=True)` within an
+outer Kanban write transaction to atomically validate a gate and save an
+idempotency receipt. Parent and review re-gating remain enforced by the same op.
+
 Times use Slack local-time date tokens with America/Los_Angeles fallback text.
 Elapsed time is measured from the latest entry into the current state, without
 resetting on same-state events; the displayed duration is a snapshot at the last

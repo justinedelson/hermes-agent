@@ -253,6 +253,7 @@ gateway:
         card_title: "**Task**: {value}"
         ask: "**Ask**: {value}"
         trail: "**Status trail**: {value}"
+        commented: "Comment added by {author}"
         in_state: "**In state**: {duration} · since {since}"
         completed: "✔ **Completed — no action needed**"
         details: "**Details**: {value}"
