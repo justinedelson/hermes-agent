@@ -1385,19 +1385,14 @@ def _record_task_failure(
     non-success path funnels through here so ``consecutive_failures`` stays
     consistent. Returns True when the task was auto-blocked.
 
-    ``release_claim=True, end_run=True``: spawn-failure path (task still
-    running with an open run — restore source phase or ``blocked``, release
-    claim, close run). Both False: timeout/crash path (caller already restored
-    the phase and closed the run; only the counter moves, a trip flips to
-    ``blocked`` + ``gave_up``). Threshold: per-task ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``. ``force_trip`` trips
-    unconditionally (caller applied its own bounded-retry policy).
-
-    ``infrastructure=True``: the host refused the spawn (no restart-safe scope,
-    #114720) — nothing about the card ran, so the run and event are recorded
-    with ``infrastructure: true`` but ``consecutive_failures`` is left alone and
-    the breaker never trips; the card stays retryable and
-    :func:`check_respawn_guard` spaces the retries.
+    ``release_claim=True, end_run=True`` settles a still-running spawn or
+    budget failure: restore its source phase, release its claim and close its run.
+    Both False: timeout/crash caller already restored the phase and closed the
+    run; only the counter moves, unless a trip emits ``blocked`` + ``gave_up``.
+    Threshold: per-task ``max_retries`` > ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``;
+    ``force_trip`` applies the caller's own bounded-retry policy.
+    ``infrastructure=True`` records a host spawn refusal without spending the
+    card's budget; :func:`check_respawn_guard` spaces these retries (#114720).
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -1407,7 +1402,12 @@ def _record_task_failure(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
-        if row is None:
+        if row is None or row["status"] in {"done", "archived"}:
+            return False
+        # Budget settlement can follow complete/block/review on the same turn.
+        # The run CAS alone cannot fence counters or events: settlement must
+        # still own a running task before it releases a claim or emits a retry.
+        if release_claim and row["status"] != "running":
             return False
         retry_status = (
             _kb._retry_status_for_run(conn, task_id, row["current_run_id"])
