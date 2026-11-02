@@ -123,6 +123,9 @@ def test_review_cli_round_trip_preserves_handoff(
 ) -> None:
     home = tmp_path / ".hermes"
     home.mkdir()
+    profile = home / "profiles" / "reviewer"
+    profile.mkdir(parents=True)
+    (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb._INITIALIZED_PATHS.clear()

@@ -47,6 +47,10 @@ def worker_env(monkeypatch, tmp_path):
     after we've created the task."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    for name in ("test-worker", "peer", "qa"):
+        profile = home / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
@@ -1274,6 +1278,11 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     # home to avoid mkdir() colliding with the worker's directory.
     home = tmp_path / "gate-home" / ".hermes"
     home.mkdir(parents=True)
+    profile = home / "profiles" / "peer"
+    profile.mkdir(parents=True)
+    (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: home.parent)
     (home / "config.yaml").write_text(
         "kanban:\n  auto_subscribe_on_create: false\n"
     )

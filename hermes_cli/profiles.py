@@ -60,15 +60,9 @@ _CLONE_ALL_STRIP: list[str] = [
     "bot-desktop/browser-profile/SingletonSocket",
 ]
 
-# Infrastructure excluded from --clone-all ONLY when the source is the default profile
-# (``~/.hermes``): git checkout (+ ~3 GB venv), worktrees, sibling profiles, shared bins,
-# npm packages, and the managed local-models trees — GGUF weights (tens of GB), the
-# llama.cpp runtime binaries and the managed Node install, all re-downloadable on demand
-# and resolved from the default root only. Named profiles never hold these at root, so the
-# gate avoids silently dropping user data from a named-profile source. Export uses a root
-# allow-list instead (``_DEFAULT_EXPORT_INCLUDE_ROOT``): an archive is a portable snapshot,
-# a clone must run. The runtime trio is ``LOCAL_RUNTIME_ROOT_DIRS``, shared with
-# ``hermes_cli.backup._EXCLUDED_ROOT_DIRS`` so the two lists cannot drift.
+# Default-profile infrastructure excluded from --clone-all; named profiles may
+# hold user data at these paths. Export uses _DEFAULT_EXPORT_INCLUDE_ROOT instead.
+# Share runtime roots with backup._EXCLUDED_ROOT_DIRS to avoid clone/backup drift.
 _CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] =  frozenset({
     "hermes-agent",
     ".worktrees",
@@ -667,6 +661,8 @@ class ProfileInfo:
     # True when ``description`` was LLM-generated and not yet user-confirmed (dashboard
     # shows a "review" badge).
     description_auto: bool = False
+    # Kanban-only routing opt-out; manual profile use is unaffected.
+    kanban_dispatch: bool = True
     # Presentation-only display name; resolution/comparison/spawn always use ``name``.
     display_name: str = ""
     # Bot Mode title (``profile.yaml`` ``ui_meta['hermes-bots'].title``) — the name
@@ -878,6 +874,9 @@ def read_profile_meta(profile_dir: Path) -> dict:
         return {
             "description": str(data.get("description") or "").strip(),
             "description_auto": bool(data.get("description_auto", False)),
+            "kanban_dispatch": not (data.get("kanban_dispatch") is False or
+                                    isinstance(data.get("kanban_dispatch"), str) and
+                                    data["kanban_dispatch"].strip().lower() in {"false", "no", "0", "off"}),
             "display_name": str(data.get("display_name") or "").strip(),
             "bot_title": bot_title,
             "previous_names": _clean_previous_names(data.get("previous_names")),

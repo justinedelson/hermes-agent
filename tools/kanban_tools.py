@@ -803,6 +803,7 @@ def _handle_complete(args: dict, **kw) -> str:
         # no way to observe what its completion just registered (#117360).
         # Report the card's durable attachment set in the result.
         return _ok(task_id=tid, run_id=run.id if run else None,
+                   status=task.status, assignee=task.assignee,
                    attachments=[
                        _fields(a, _ATTACHMENT_FIELDS)
                        for a in kb.list_attachments(conn, tid)])
@@ -1102,6 +1103,8 @@ def _handle_create(args: dict, **kw) -> str:
     assignee = args.get("assignee")
     _check(assignee, "assignee is required — name the profile that should execute this "
                      "task (the dispatcher will only spawn tasks with an assignee)")
+    from hermes_cli.kanban_dispatch_policy import require_dispatch_eligible
+    require_dispatch_eligible(str(assignee))
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing

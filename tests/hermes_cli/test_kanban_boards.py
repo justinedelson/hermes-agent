@@ -350,7 +350,11 @@ class TestCLI:
 
 
     def test_per_board_task_isolation_via_cli(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        home = tmp_path / ".hermes"
+        profile = home / "profiles" / "dev"
+        profile.mkdir(parents=True)
+        (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
+        env = {"HOME": str(tmp_path), "HERMES_HOME": str(home)}
         assert _cli(["boards", "create", "projA"], env_extra=env).returncode == 0
         assert _cli(["boards", "create", "projB"], env_extra=env).returncode == 0
 

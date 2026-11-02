@@ -41,10 +41,7 @@ DEFAULT_FAILURE_LIMIT = 2
 # before max_runtime_seconds kills it.
 KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS = 30
 
-# A healthy worker is still alive for a while after kanban_complete /
-# kanban_request_review returns (final assistant turn, session persistence), so
-# a run's retained worker is only reaped once ended_at is at least this old
-# (two default dispatch ticks).
+# A closed run's worker may still be persisting its final turn; reap after two ticks.
 TERMINAL_WORKER_REAP_GRACE_SECONDS = 120
 
 # ---------------------------------------------------------------------------
@@ -87,18 +84,7 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 
 @dataclass
 class DispatchResult:
-    """Outcome of a single ``dispatch`` pass.
-
-    ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
-    telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
-    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
-    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
-    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
-    profile is busy" vs
-    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
-    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
-    is
-    """
+    """Outcome of a dispatch pass; per-task and tick-level holds stay distinct."""
 
     reclaimed: int = 0
     promoted: int = 0
@@ -122,6 +108,8 @@ class DispatchResult:
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
+    skipped_ineligible: list[str] = field(default_factory=list)
+    """Task ids held because their profile explicitly opted out of Kanban."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
@@ -1691,6 +1679,17 @@ def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
     return bool(to) and "from" in data and data["from"] != to
 
 
+def is_dispatch_eligible(name: str, cfg=None, *, read_only=False) -> bool:
+    """Fresh Kanban-only predicate, with the existing fail-closed home allowlist."""
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists, read_profile_meta
+    if not name or not profile_exists(name):
+        return False
+    if read_profile_meta(get_profile_dir(name)).get("kanban_dispatch") is False:
+        return False
+    allow = _dispatch_profile_allowlist(normalize_profile_name, cfg, read_only=read_only)
+    return allow is None or normalize_profile_name(name) in allow
+
+
 def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
     """``hermes_cli.profiles.profile_exists``, or ``None`` when it cannot be
     imported (local import avoids a cycle; callers fall back to trusting the
@@ -1705,21 +1704,10 @@ def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
         from hermes_cli.profiles import normalize_profile_name, profile_exists
     except Exception:
         return None
-    allowlist = _dispatch_profile_allowlist(normalize_profile_name)
-    if allowlist is None:
-        return profile_exists
-
-    def _gated(name: str) -> bool:
-        try:
-            canon = normalize_profile_name(name)
-        except ValueError:
-            return False
-        return canon in allowlist and bool(profile_exists(name))
-
-    return _gated
+    return is_dispatch_eligible
 
 
-def _dispatch_profile_allowlist(normalize_profile_name) -> Optional[frozenset]:
+def _dispatch_profile_allowlist(normalize_profile_name, cfg=None, *, read_only=False) -> Optional[frozenset]:
     """Per-home claim allowlist ``kanban.dispatch_profiles`` (#110995).
 
     On a shared board (one ``kanban.db`` mounted across several Hermes homes),
@@ -1741,7 +1729,11 @@ def _dispatch_profile_allowlist(normalize_profile_name) -> Optional[frozenset]:
     """
     try:
         from hermes_cli.config_effective import load_user_config_effective
-        kanban = (load_user_config_effective(fail_closed=True) or {}).get("kanban", {})
+        kanban = (load_user_config_effective(fail_closed=True, backup_good=not read_only) or {}).get("kanban", {})
+        # Merged defaults include a null placeholder, not an operator opt-out.
+        supplied = cfg.get("kanban", {}) if isinstance(cfg, Mapping) else {}
+        if isinstance(supplied, Mapping) and supplied.get("dispatch_profiles") is not None:
+            kanban = supplied
     except Exception as exc:
         _kb._log.warning(
             "kanban: could not read kanban.dispatch_profiles (%s: %s) — "
@@ -2000,6 +1992,8 @@ def dispatch_once(
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
     """
+    from hermes_cli.kanban_dispatch_policy import warn_root_verification_policy
+    warn_root_verification_policy(conn=conn)
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
             conn,
@@ -2075,6 +2069,9 @@ def _dispatch_lane_task(
     # it by assigning a profile, and health telemetry suppresses "stuck" for it.
     profile_exists = _profile_exists_fn()
     if profile_exists is not None and not profile_exists(assignee):
+        from hermes_cli.kanban_dispatch_policy import skip_ineligible_task
+        if skip_ineligible_task(conn, task_id, assignee, result, dry_run=dry_run):
+            return False
         result.skipped_nonspawnable.append(task_id)
         # Per-task diagnostic so ``show``/``tail`` name the missing profile instead of leaving
         # the card in ``ready`` with zero board evidence (#122422). Unlike a respawn guard the
@@ -2185,6 +2182,8 @@ def _apply_default_assignee(
     by the default, not "unassigned but secretly routed". ``dry_run`` reports
     without writing. Returns False when the write failed.
     """
+    if not is_dispatch_eligible(assignee):
+        return False
     if dry_run:
         return True
     try:

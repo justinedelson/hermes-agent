@@ -1977,9 +1977,9 @@ def atomic_config_replace(
 
 def load_config() -> dict[str, Any]:
     """Load the merged configuration (DEFAULT_CONFIG + config.yaml + managed scope, env-expanded).
-    Cached on the file signature; returns a deepcopy since most call sites mutate the result.
-    Read-only hot paths should use ``load_config_readonly()`` to skip the deepcopy."""
-    return _load_config_impl(want_deepcopy=True)
+    Cached on the file signature; returns a deepcopy; hot readers use ``load_config_readonly()``."""
+    from hermes_cli.kanban_dispatch_policy import warn_root_verification_policy
+    return warn_root_verification_policy(_load_config_impl(want_deepcopy=True))
 
 
 def load_config_readonly() -> dict[str, Any]:

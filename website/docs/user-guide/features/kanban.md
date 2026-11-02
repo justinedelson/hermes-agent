@@ -888,10 +888,82 @@ Config knobs (all under `kanban:` in `~/.hermes/config.yaml`):
 | `auto_decompose` | `true` | Dispatcher auto-runs the built-in decomposer for Triage tasks every tick. It does not gate profile-driven `kanban_create` calls or creator wake turns. |
 | `auto_decompose_per_tick` | `3` | Cap on decompositions per dispatcher tick. Excess defers to the next tick. |
 | `orchestrator_profile` | `""` | Profile assigned to the root/orchestration task after decomposition. Empty = the root task keeps its own assignee, else the active default profile. |
-| `default_assignee` | `""` | Where a child task lands when the LLM picks an unknown profile. Empty = fall back to the root task's assignee, else the active default. |
-| `auto_subscribe_on_create` | `true` | When `kanban_create` runs inside a persistent gateway/TUI session, terminal events resume that originating agent with a synthetic status turn. Set to `false` for passive completion or to require explicit `kanban_notify-subscribe` calls. Independent of `auto_decompose`. |
-| `notify_in_gateway` | `true` | Poll and deliver Kanban subscriptions from this gateway. Set to `false` on profiles that own no notification subscriptions to stop the idle five-second notifier poll. Independent of `dispatch_in_gateway`; non-dispatch gateways may still own profile-specific delivery adapters. |
-| `done_sub_retention_days` | `30` | Notify subscriptions survive `done` (reopen-safe) and are removed on `archived`. The notifier GC purges subscriptions whose task has been `done` or `blocked` with no new events for this many days, bounding sub-table growth on boards that never archive. `0` disables the sweep. |
+| `default_assignee` | `""` | Fallback worker when a decomposition picks an unknown profile; every candidate must be dispatch-eligible. |
+| `verify_profile` | `""` | Eligible review profile; empty disables automatic completion-to-review conversion. |
+| `auto_subscribe_on_create` | `true` | Resume the originating gateway/TUI session on lifecycle events. |
+| `notify_in_gateway` | `true` | Poll and deliver this gateway's profile-specific notification subscriptions. |
+| `done_sub_retention_days` | `30` | Retain subscriptions after done/blocked for this many inactive days; 0 disables GC. |
+
+### Profile dispatch eligibility and automatic verification
+
+A profile can remain available manually while opting out of Kanban. Set
+`kanban_dispatch: false` in its `profile.yaml` (including the root home's
+`profile.yaml` for `default`). Missing or null means eligible; boolean false
+and the strings `false`, `no`, `0`, and `off` mean ineligible. This flag never
+moves or deletes sessions, memories, or profile directories.
+
+The decomposer, default-assignee resolver, worker spawn gate, and assignment
+validation share the same eligibility rule. The per-home `dispatch_profiles`
+allowlist further narrows it; keep the key omitted for unrestricted local
+claims, not `null`. An explicitly opted-out assignee is blocked with a
+`skipped_ineligible` event rather than left waiting in `ready` or `review`.
+CLI `create` and `assign` have `--allow-ineligible` for manual assignment;
+that override does not bypass the spawn gate.
+
+To enable independent verification on a board:
+
+```bash
+hermes kanban --board project config set verify_profile verifier
+hermes kanban --board project config get verify_profile
+```
+
+The optional `verify_profile` value lives in the board's SQLite metadata, not
+`board.json` or a worker's environment. An explicit empty value disables
+verification; `config unset verify_profile` removes the override. Without an
+override, only the explicitly bound owning profile's `kanban.verify_profile`
+applies. Named profiles **never inherit** root/default verification settings.
+The root setting may still govern work claimed in the default profile's own
+scope. Both dispatch and configuration loading warn when the root setting is
+nonempty but the board has no explicit override; the diagnostic never supplies
+policy to a named profile.
+
+The verifier must be installed and dispatch-eligible. Each new implementation
+claim freezes the resolved verifier (including an empty policy) and automatic
+review origin. Board/profile config edits affect subsequent claims, not an
+active implementation's handoff. Legacy runs without a snapshot consult only
+their owning profile, not a newly migrated board override or the launch profile.
+
+Completion moves non-review work to the same card's `review` lane, preserving
+its handoff and artifacts. Downstream cards wait for final verifier approval.
+Direct verifier cards and runs claimed from review finish normally. When an
+unfinished direct child is already assigned to the snapshotted verifier,
+completion releases that existing lane instead of duplicating same-card review.
+Three rejections within one **automatic verification sequence** block the card
+for a human decision. Manual-review history does not count; an explicit human
+unblock starts a fresh revision sequence.
+
+Existing boards are migrated only by an explicit operator choice:
+
+```bash
+hermes kanban migrate-verification --boards project another --verify-profile verifier --dry-run
+# After reviewing the preview:
+hermes kanban migrate-verification --boards project another --verify-profile verifier --apply
+```
+
+Omitting `--apply` is also a read-only preview. Preview does not initialize or
+upgrade any database; it reads disposable database/WAL copies without changing
+the originals. Apply changes only board policy, leaving active claims, tasks,
+historical runs, and events untouched. Open unclaimed cards receive the policy
+on their next implementation claim. Missing or archived boards are refused.
+
+`hermes kanban reassign-ineligible --dry-run` previews a separate open-card
+assignment migration; omit `--dry-run` to apply it. Only explicit profile
+opt-outs are migrated: review cards (including blocked reviews) go to the board
+verifier, other idle open cards to `default_assignee`. Review implementer
+provenance and PR-acceptance credentials remain attached to the original
+implementer. Running and finished cards and run history are never rewritten.
+Local allowlist exclusions and missing/foreign profiles are not candidates.
+Re-enable a profile by setting its flag to true or deleting the key.
 
 And the two auxiliary LLM slots:
 

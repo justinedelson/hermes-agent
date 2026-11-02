@@ -49,7 +49,8 @@ def _recover_user_raw(config_path: Path, path_key: str, exc: Exception) -> dict[
     return copy.deepcopy(raw) if raw is not None else {}
 
 
-def load_user_config_effective(config_path: Optional[Path] = None, *, fail_closed: bool = False) -> dict[str, Any]:
+def load_user_config_effective(config_path: Optional[Path] = None, *, fail_closed: bool = False,
+                               backup_good: bool = True) -> dict[str, Any]:
     """User ``config.yaml`` → ``${VAR}`` expansion → managed overlay → model-key canonicalization.
     NO ``DEFAULT_CONFIG`` merge: a key absent from the file (and from the managed layer) is absent
     here, so ``{}`` sentinels and presence-sensitive bridges keep working. An absent file is an
@@ -59,7 +60,8 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     last-good state); otherwise the last successfully parsed user file — in-process first, then
     the newest ``backups/config/*.good.*`` copy — is served through the same pipeline, so a
     mid-edit torn write never silently drops user overrides (same contract as ``load_config``).
-    Cached on the user + managed file signatures and the values of every referenced env var."""
+    Cached on file signatures and referenced env vars. Read-only fail-closed inspections set
+    ``backup_good=False`` to avoid creating successful-read backups."""
     from agent.safe_worker_policy import worker_config_snapshot
 
     # A frozen-policy worker is detached from the profile's files: the owner-supplied
@@ -93,12 +95,13 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
                 raw, recovered = _recover_user_raw(config_path, path_key, exc), True
             else:
                 raw = loaded if isinstance(loaded, dict) else {}
-                _config._raw_config_cache_store(path_key, user_sig, copy.deepcopy(raw))
+                if backup_good:
+                    _config._raw_config_cache_store(path_key, user_sig, copy.deepcopy(raw))
                 _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
                 # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
                 # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
+                if backup_good and config_path == _config.get_config_path():
                     from hermes_cli.config_backups import backup_config
                     backup_config(config_path, "good")
 
@@ -109,7 +112,7 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         effective = _effective(raw)
         # A recovered result is never cached under the corrupt file's signature: a later
         # ``fail_closed`` caller must still see the parse error, not a cache hit.
-        if cache_sig is not None and not recovered:
+        if cache_sig is not None and not recovered and backup_good:
             _EFFECTIVE_CACHE[path_key] = (*cache_sig, copy.deepcopy(effective), env_snapshot)
         else:
             _EFFECTIVE_CACHE.pop(path_key, None)

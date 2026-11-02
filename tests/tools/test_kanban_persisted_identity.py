@@ -10,6 +10,7 @@ process home last. Identity never comes from tool args (#19713).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -19,9 +20,12 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 @pytest.fixture
 def board_env(tmp_path, monkeypatch):
     """A root-profile board with two served profiles beside it and no env pin at all."""
-    root = tmp_path / "hroot"
-    for name in ("alpha", "beta"):
-        (root / "profiles" / name).mkdir(parents=True)
+    root = tmp_path / ".hermes"
+    for name in ("alpha", "beta", "peer"):
+        profile = root / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(root))
     for var in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_SESSION_ID", "HERMES_KANBAN_DB",
                 "HERMES_KANBAN_HOME", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_WORKSPACES_ROOT"):

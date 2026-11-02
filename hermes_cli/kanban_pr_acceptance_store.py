@@ -32,6 +32,13 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
     # The assignee profile's gh login owns the repo: acceptance must not run as
     # the ambient login of whichever process completes the card (#122689).
     assignee = conn.execute("SELECT assignee FROM tasks WHERE id=?", (task_id,)).fetchone()["assignee"]
+    # Review moves the assignee to the verifier, but publication credentials
+    # remain owned by the implementer. Still collect fresh exact-head evidence.
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_dispatch_policy import is_review_phase
+    if is_review_phase(conn, task_id):
+        review = kb._latest_event(conn, task_id, "review_requested")
+        assignee = kb._json_dict(kb._row_get(review, "payload")).get("implementer") or assignee
     return snapshot, collect_acceptance(contract, published_pr, assignee=assignee)
 
 

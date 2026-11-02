@@ -25,6 +25,9 @@ def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    profile = home / "profiles" / "r"
+    profile.mkdir(parents=True)
+    (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
@@ -44,10 +47,6 @@ def _init_git_repo(repo: Path) -> None:
 # ---------------------------------------------------------------------------
 # Schema / init
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 

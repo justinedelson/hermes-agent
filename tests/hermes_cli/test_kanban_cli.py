@@ -249,7 +249,8 @@ def test_run_slash_reclaim_running_task(kanban_home):
     import secrets
     from hermes_cli import kanban_db_connect as kbc
 
-    out1 = kc.run_slash("create 'stuck worker task' --assignee broken-model")
+    # Recovery must also work for historical cards whose profile is missing.
+    out1 = kc.run_slash("create 'stuck worker task' --assignee broken-model --allow-ineligible")
     m = re.search(r"(t_[a-f0-9]+)", out1)
     assert m
     tid = m.group(1)

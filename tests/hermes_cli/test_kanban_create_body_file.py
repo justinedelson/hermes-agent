@@ -25,6 +25,9 @@ BODY = "line one\nline two\n--json\n--body should survive verbatim\n"
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    profile = home / "profiles" / "baxter"
+    profile.mkdir(parents=True)
+    (profile / "profile.yaml").write_text("kanban_dispatch: true\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

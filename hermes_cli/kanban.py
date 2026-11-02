@@ -33,6 +33,7 @@ from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser
+from hermes_cli.kanban_dispatch_policy import cmd_reassign_ineligible, cmd_board_config, cmd_migrate_verification
 
 
 # --- Flag parsing helpers ---
@@ -179,8 +180,11 @@ def kanban_command(args: argparse.Namespace) -> int:
     with board_scope:
         # `repair` dispatches BEFORE auto-init: on a corrupt DB init_db() itself raises
         # KanbanDbCorruptError, which would turn every repair into "could not initialize database".
-        if action == "repair":
-            return _cmd_repair(args)
+        if action in ("repair", "migrate-verification"):
+            try:
+                return (_cmd_repair if action == "repair" else cmd_migrate_verification)(args)
+            except (ValueError, RuntimeError) as exc:
+                return _err(f"kanban: {exc}")
         # init_db is idempotent (one sqlite_master SELECT when tables exist) and prevents
         # "no such table: tasks" on first use from a fresh HERMES_HOME.
         try:
@@ -334,6 +338,12 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
 
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
+    from hermes_cli.kanban_dispatch_policy import require_dispatch_eligible
+    if not getattr(args, "allow_ineligible", False):
+        try:
+            require_dispatch_eligible(args.assignee)
+        except ValueError as exc:
+            return _err(f"kanban: {exc}", 2)
 
     body = args.body
     body_file = getattr(args, "body_file", None)
@@ -572,6 +582,12 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _cmd_assign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
+    from hermes_cli.kanban_dispatch_policy import require_dispatch_eligible
+    if not getattr(args, "allow_ineligible", False):
+        try:
+            require_dispatch_eligible(profile)
+        except ValueError as exc:
+            return _err(f"kanban: {exc}", 2)
     with kbc.connect_closing() as conn:
         ok = kb.assign_task(conn, args.task_id, profile)
     return _ok_or_err(ok, f"no such task: {args.task_id}",
@@ -1325,6 +1341,8 @@ _HANDLERS = {
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
+    "config": cmd_board_config,
+    "reassign-ineligible": cmd_reassign_ineligible,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,

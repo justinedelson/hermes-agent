@@ -1899,9 +1899,9 @@ DEFAULT_CONFIG = {
         # Profile for the root/orchestration task after Triage decomposition; "" = default profile.
         # Does not control the decomposer LLM path (see auxiliary.kanban_decomposer).
         "orchestrator_profile": "",
-        # Assignee when the orchestrator can't match one to an installed profile; "" = default
-        # profile. A task never ends up with assignee=None.
+        # Fallback eligible assignee; "" considers the default profile if eligible.
         "default_assignee": "",
+        "verify_profile": "",  # Owning-profile fallback; board metadata overrides (empty disables).
         # Global cap: positive int = the HOST never has more than N tasks 'running' across all
         # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
         # MemTotal is unreadable (macOS/Windows) None means no cap.

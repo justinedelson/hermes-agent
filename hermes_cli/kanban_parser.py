@@ -165,6 +165,7 @@ _SPECS = [
                   "newlines or flag-like lines survive shell quoting. "
                   "Mutually exclusive with --body."),
         _arg("--assignee", help="Profile name to assign"),
+        _arg("--allow-ineligible", action="store_true", help="Permit manual non-dispatch assignment; spawn gate still applies"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
@@ -248,7 +249,8 @@ _SPECS = [
     ], aliases=["ls"], help="List tasks"),
     _cmd("show", [_TASK_ID, _json_flag(), *_run_state_args("filter listed runs by task_runs column")],
          help="Show a task with comments + events"),
-    _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
+    _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)"),
+                    _arg("--allow-ineligible", action="store_true", help="Permit a manual non-dispatch assignment")],
          help="Assign or reassign a task"),
     _cmd("set-model", [
         _TASK_ID,
@@ -258,6 +260,20 @@ _SPECS = [
                   "--provider <name>). Cleared together with the model."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
     _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("config", children=("config_action", [
+        _cmd("set", [_arg("key", choices=["verify_profile"]), _arg("value")]),
+        _cmd("get", [_arg("key", choices=["verify_profile"])]),
+        _cmd("unset", [_arg("key", choices=["verify_profile"])]),
+    ]), help="Read or change board-owned policy"),
+    _cmd("migrate-verification", [
+        _arg("--boards", nargs="+", required=True, help="Existing boards selected for migration"),
+        _arg("--verify-profile", required=True, help="Explicit verifier to copy into board policy"),
+        _arg("--dry-run", action="store_true", help="Read-only preview (the default)"),
+        _arg("--apply", action="store_true", help="Apply the selected policy after reviewing the preview"),
+    ], help="Preview or explicitly migrate existing board verification policy"),
+    _cmd("reassign-ineligible", [
+        _arg("--dry-run", action="store_true", help="Preview without changing cards"), _json_flag(),
+    ], help="Reassign idle open cards on ineligible profiles; preserve runs and history"),
     _cmd("reassign", [
         _TASK_ID,
         _arg("profile", help="New profile name (or 'none' to unassign)"),

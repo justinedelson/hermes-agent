@@ -877,6 +877,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     block_recurrences    INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS board_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_links (
     parent_id  TEXT NOT NULL,
     child_id   TEXT NOT NULL,
@@ -2161,9 +2162,11 @@ def _claim_and_open_run(
     )
     run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
+    from hermes_cli.kanban_dispatch_policy import claim_verification_policy
+    policy = claim_verification_policy(conn, task_id, source_status)
     _append_event(
         conn, task_id, "claimed",
-        {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
+        {"lock": lock, "expires": expires, "run_id": run_id, **policy, **(event_extra or {})}, run_id=run_id,
     )
     return run_id
 
@@ -2674,6 +2677,17 @@ def complete_task(
     acceptance = prepare_acceptance(conn, task_id, expected_run_id, metadata)
     if acceptance is False:
         return False
+    from hermes_cli.kanban_dispatch_policy import completion_verifier
+    verifier = completion_verifier(conn, task_id)
+    if verifier:
+        review_metadata = dict(metadata or {})
+        if verified_cards:
+            review_metadata["verified_cards"] = verified_cards
+        return request_review(
+            conn, task_id, summary=handoff_summary, metadata=review_metadata,
+            reviewer=verifier, expected_run_id=expected_run_id, force=force,
+            completion_result=result, from_completion=True, completion_acceptance=acceptance,
+        )
     with write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
@@ -3173,7 +3187,8 @@ def block_task(
                 "kind": kind, "reason": reason, "classified_in_place": True, **action,
             })
             return True
-        source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
+        source_status = (_retry_status_for_run(conn, task_id) if cur_row["status"] == "running"
+                         else "review" if cur_row["status"] == "review" else "ready")
         requested_kind = kind
         rekind_reason = None
         # ``dependency`` only waits on incomplete parents. A worker filing that
@@ -3200,7 +3215,7 @@ def block_task(
                        worker_pid    = NULL,
                        {set_sql}
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('running', 'ready', 'review')
                 """
         params = (*params, task_id)
         if expected_run_id is not None:
@@ -3238,6 +3253,8 @@ def request_review(
     metadata: Optional[dict] = None, reviewer: Optional[str] = None,
     expected_run_id: Optional[int] = None, force: bool = False, with_reason: bool = False,
     ask: Optional[str] = None, audience: Optional[str] = None,
+    completion_result: Optional[str] = None, from_completion: bool = False,
+    completion_acceptance=None,
 ):
     """``running``/``ready`` -> ``review``; never touches block recurrence accounting.
 
@@ -3291,6 +3308,10 @@ def request_review(
                     "(worker ownership) or force=True (explicit operator "
                     "override) instead of clearing the live run's claim",
                 )
+            if completion_acceptance is not None:
+                from hermes_cli.kanban_pr_acceptance_store import record_acceptance
+                if not record_acceptance(conn, task_id, completion_acceptance):
+                    return _ret(False, "PR acceptance or ownership check failed")
             if reviewer is None:
                 reviewer = _prior_reviewer(conn, task_id)
                 if reviewer is False:
@@ -3300,6 +3321,9 @@ def request_review(
                         "malformed); pass reviewer= explicitly",
                     )
             reviewer = _canonical_assignee(reviewer)
+            if reviewer is not None and not from_completion:
+                from hermes_cli.kanban_dispatch_policy import require_dispatch_eligible
+                require_dispatch_eligible(reviewer)
             # The actor is the run that did the work. ``assignee`` is the actor
             # only while a worker holds the card; on a never-claimed card it is
             # whoever the operator assigned -- possibly the reviewer itself,
@@ -3320,20 +3344,21 @@ def request_review(
             assignee_sql = ", assignee = ?" if reviewer is not None else ""
             run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
             params: tuple[Any, ...] = (
-                *(() if reviewer is None else (reviewer,)), task_id,
+                completion_result, *(() if reviewer is None else (reviewer,)), task_id,
                 *(() if expected_run_id is None else (int(expected_run_id),)),
             )
             cur = conn.execute(
                 """
                 UPDATE tasks
                    SET status        = 'review',
+                       result        = COALESCE(?, result),
                        claim_lock    = NULL,
                        claim_expires = NULL,
                        worker_pid    = NULL
                 """ + assignee_sql + """
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
-                """ + run_guard,
+                """ + (" AND status IN ('running', 'ready', 'blocked')" if from_completion
+                       else " AND status IN ('running', 'ready')") + run_guard,
                 params,
             )
             if cur.rowcount != 1:
@@ -3355,6 +3380,9 @@ def request_review(
                 "reviewer": reviewer,
                 **action,
             }
+            if from_completion:
+                from hermes_cli.kanban_dispatch_policy import automatic_review_origin
+                payload.update(automatic_review_origin(conn, task_id, run_id))
             staged = _cleaned_artifact_paths(metadata)
             if staged:
                 payload["artifacts"] = staged
@@ -3393,71 +3421,12 @@ def request_changes(
     """Close an active reviewer run (claimed from ``review``) and hand the task
     back to the implementer from the latest ``review_requested`` event, parent
     gating reapplied. Returns ``(ok, implementer | reason)``."""
-    from hermes_cli.kanban_notification_fields import notification_fields
-    action = notification_fields(ask, audience)
-    reason = str(redact_review_value(reason or "")).strip()
-    if not reason:
-        return False, "reason is required"
+    from hermes_cli.kanban_dispatch_policy import request_review_changes
+    return request_review_changes(
+        conn, task_id, reason=reason, expected_run_id=expected_run_id,
+        ask=ask, audience=audience,
+    )
 
-    with write_txn(conn):
-        task_row = conn.execute(
-            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
-        ).fetchone()
-        if task_row is None:
-            return False, "task not found"
-        current_run_id = task_row["current_run_id"]
-        if task_row["status"] != "running" or current_run_id is None:
-            return False, "task is not in an active review run"
-        if expected_run_id is not None and int(current_run_id) != int(expected_run_id):
-            return False, "run_id mismatch"
-
-        claimed_event = _latest_event(conn, task_id, "claimed", current_run_id)
-        claimed_payload = _json_dict(_row_get(claimed_event, "payload"))
-        if claimed_payload.get("source_status") != "review":
-            return False, "active run was not claimed from review"
-
-        requested_event = _latest_event(conn, task_id, "review_requested")
-        if requested_event is None:
-            return False, "no prior review_requested event"
-        implementer = _nonblank_str(_json_dict(requested_event["payload"]).get("implementer"))
-        if implementer is None:
-            return False, "review handoff has no valid implementer provenance"
-        reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
-
-        new_status = _landing_status_after_parents(conn, task_id)
-        # consecutive_failures deliberately PRESERVED: a review transition is
-        # not evidence the pathology cleared; only complete_task resets it.
-        cur = conn.execute(
-            """
-            UPDATE tasks
-               SET status = ?,
-                   assignee = COALESCE(?, assignee),
-                   claim_lock = NULL,
-                   claim_expires = NULL,
-                   worker_pid = NULL, worker_started_at = NULL
-             WHERE id = ? AND status = 'running' AND current_run_id = ?
-            """,
-            (new_status, implementer, task_id, int(current_run_id)),
-        )
-        if cur.rowcount != 1:
-            return False, "task changed during review handoff"
-        run_id = _end_run(
-            conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
-        )
-        _append_event(
-            conn,
-            task_id,
-            "changes_requested",
-            {
-                "reason": reason,
-                "implementer": implementer,
-                "reviewer": reviewer,
-                "status": new_status,
-                **action,
-            },
-            run_id=run_id,
-        )
-    return True, implementer
 
 
 def promote_task(
@@ -4081,10 +4050,13 @@ def list_profiles_on_disk() -> list[str]:
 def known_assignees(conn: sqlite3.Connection) -> list[dict]:
     """``{"name", "on_disk", "counts"}`` for every on-disk profile or task
     assignee, so a fresh profile appears in pickers before it has a task."""
-    on_disk = set(list_profiles_on_disk())
+    from hermes_cli.profiles import list_profile_names
+    from hermes_cli.kanban_db_dispatch import is_dispatch_eligible
+    on_disk = set(list_profile_names())
     counts = _counts_by_assignee(conn)
     return [
-        {"name": name, "on_disk": name in on_disk, "counts": counts.get(name, {})}
+        {"name": name, "on_disk": name in on_disk, "counts": counts.get(name, {}),
+         "dispatch_eligible": is_dispatch_eligible(name)}
         for name in sorted(on_disk | set(counts))
     ]
 

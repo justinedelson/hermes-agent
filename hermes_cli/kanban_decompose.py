@@ -26,6 +26,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
+from hermes_cli.kanban_db_dispatch import is_dispatch_eligible
 from hermes_cli.kanban_specify import (
     _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
 )
@@ -126,7 +127,7 @@ def _profile_author() -> str:
     return _specify_author("decomposer")
 
 
-def _resolve_profile_from_cfg(cfg: dict, key: str, *, fallback: Optional[str] = None) -> str:
+def _resolve_profile_from_cfg(cfg: dict, key: str, *, fallback: Optional[str] = None) -> Optional[str]:
     """``kanban.<key>`` if it names an existing profile, else ``fallback``
     (the root task's own assignee) if that does, else the active default
     profile — so a task is never stranded for lack of an owner.
@@ -140,20 +141,23 @@ def _resolve_profile_from_cfg(cfg: dict, key: str, *, fallback: Optional[str] = 
     """
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     explicit = (kanban_cfg.get(key) or "").strip()
-    for candidate in (explicit, (fallback or "").strip()):
+    try:
+        active = profiles_mod.get_active_profile_name() or "default"
+    except Exception:
+        logger.exception("Could not resolve the active profile; trying the default")
+        active = "default"
+    for candidate in (explicit, (fallback or "").strip(), active, "default"):
         if candidate:
             try:
-                if profiles_mod.profile_exists(candidate):
+                if (is_dispatch_eligible(candidate, cfg) if key == "default_assignee"
+                        else profiles_mod.profile_exists(candidate)):
                     return candidate
             except Exception:
                 pass
-    try:
-        return profiles_mod.get_active_profile_name() or "default"
-    except Exception:
-        return "default"
+    return None
 
 
-def _build_roster() -> tuple[list[dict], set[str]]:
+def _build_roster(cfg=None) -> tuple[list[dict], set[str]]:
     """``(roster_for_prompt, valid_assignee_names)``; entries are
     ``{name, description, has_description}``."""
     try:
@@ -163,13 +167,15 @@ def _build_roster() -> tuple[list[dict], set[str]]:
         return [], set()
     roster = []
     for p in all_profiles:
+        if not is_dispatch_eligible(p.name, cfg):
+            continue
         desc = (p.description or "").strip()
         roster.append({
             "name": p.name,
             "description": desc or f"(no description; profile named {p.name!r})",
             "has_description": bool(desc),
         })
-    return roster, {p.name for p in all_profiles}
+    return roster, {p["name"] for p in roster}
 
 
 def _format_roster(roster: list[dict]) -> str:
@@ -195,7 +201,7 @@ class _Routing:
     """Config-derived routing context for one decomposition."""
 
     orchestrator: str
-    default_assignee: str
+    default_assignee: Optional[str]
     auto_promote: bool
     roster: list[dict]
     valid_names: set[str]
@@ -208,7 +214,7 @@ def _load_routing(*, root_assignee: Optional[str] = None) -> _Routing:
     except Exception:  # decompose_task promises ok=False, never a raise, on config trouble
         cfg = {}
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-    roster, valid_names = _build_roster()
+    roster, valid_names = _build_roster(cfg)
     return _Routing(
         orchestrator=_resolve_profile_from_cfg(cfg, "orchestrator_profile", fallback=root_assignee),
         default_assignee=_resolve_profile_from_cfg(cfg, "default_assignee", fallback=root_assignee),
@@ -222,7 +228,7 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
     """``fanout=false``: single-task spec promotion (same effect as specify)."""
     title_val, body_val = _title_body(parsed)
     assignee_val = None
-    if not task.assignee:
+    if task.assignee not in routing.valid_names:
         assignee_val = _normalize_assignee_choice(
             parsed.get("assignee"), default_assignee=routing.default_assignee, valid_names=routing.valid_names,
         )
@@ -314,6 +320,10 @@ def decompose_task(
         return DecomposeOutcome(task_id, False, reason)
 
     routing = _load_routing(root_assignee=task.assignee)
+    if routing.default_assignee is None:
+        with kbc.connect_closing() as conn, kb.write_txn(conn):
+            kb._append_event(conn, task_id, "decompose_skipped", {"reason": "no_eligible_assignee"})
+        return DecomposeOutcome(task_id, False, "no_eligible_assignee")
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(
