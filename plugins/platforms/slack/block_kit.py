@@ -42,6 +42,32 @@ MAX_TABLE_CHARS = 10000  # aggregate across all cells
 
 Block = dict[str, Any]
 
+
+def markdown_block_payload(content: str) -> Optional[list[Block]]:
+    """Native markdown below Slack's 12k aggregate cap, leaving feedback headroom."""
+    ok = content and content.strip() and len(content) <= 11_500
+    return [{"type": "markdown", "text": content}] if ok else None
+
+
+def feedback_block() -> Block:
+    """Return the Slack AI feedback-buttons block."""
+    from agent.i18n import t
+
+    return {
+        "type": "context_actions",
+        "elements": [
+            {
+                "type": "feedback_buttons",
+                "action_id": "hermes_feedback",
+                "positive_button": {
+                    "text": {"type": "plain_text", "text": t("platform.slack.feedback.good")[:75]},
+                    "accessibility_label": t("platform.slack.feedback.good_a11y")[:75],
+                    "value": "positive"},
+                "negative_button": {
+                    "text": {"type": "plain_text", "text": t("platform.slack.feedback.bad")[:75]},
+                    "accessibility_label": t("platform.slack.feedback.bad_a11y")[:75],
+                    "value": "negative"}}]}
+
 # ----------------------------------------------------------------------------
 # Line classification
 # ----------------------------------------------------------------------------

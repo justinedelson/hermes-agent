@@ -12,14 +12,14 @@ def test_attention_hook_mentions_only_new_history_not_edited_card(tmp_path, monk
     async def hook(name, **kwargs):
         if name == "kanban_notify_prepare":
             observed.append(kwargs)
-            return [{"attention_text": "<@W4RPPHL3V>"}]
+            return [{"attention_text": "<@UEXAMPLE>"}]
         return []
 
     monkeypatch.setattr(lifecycle, "ainvoke_hook", hook)
     change(task_id, "blocked", kind="needs_input", audience="human", ask="Choose a region")
     asyncio.run(deliver(runner, collect(runner)))
-    assert "<@W4RPPHL3V>" not in client.calls[0][1]["text"]
-    assert client.calls[1][1]["text"].startswith("<@W4RPPHL3V> ")
+    assert "<@UEXAMPLE>" not in client.calls[0][1]["text"]
+    assert client.calls[1][1]["text"].startswith("<@UEXAMPLE> ")
     assert observed[0]["event_payload"]["audience"] == "human"
     assert observed[0]["subscription"]["task_id"] == task_id
     assert not collect(runner)
@@ -62,7 +62,7 @@ def test_presentation_consumer_can_refresh_cards_when_diagnostics_are_muted(tmp_
     (get_hermes_home() / "config.yaml").write_text("display: {suppress_warning_notifications: true}")
 
     async def hook(name, **kwargs):
-        return [{"attention_text": "<@W4RPPHL3V>", "diagnostic": False}] if name == "kanban_notify_prepare" else []
+        return [{"attention_text": "<@UEXAMPLE>", "diagnostic": False}] if name == "kanban_notify_prepare" else []
 
     monkeypatch.setattr(lifecycle, "ainvoke_hook", hook)
     with kbc.connect() as conn:
@@ -70,7 +70,7 @@ def test_presentation_consumer_can_refresh_cards_when_diagnostics_are_muted(tmp_
         conn.commit()
     asyncio.run(deliver(runner, collect(runner)))
     assert [method for method, _ in client.calls] == ["update", "post"]
-    assert client.calls[-1][1]["text"].startswith("<@W4RPPHL3V>")
+    assert client.calls[-1][1]["text"].startswith("<@UEXAMPLE>")
 
 
 def test_tick_binds_every_served_profile_and_refuses_foreign_owner(tmp_path, monkeypatch):

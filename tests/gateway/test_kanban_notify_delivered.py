@@ -45,6 +45,8 @@ async def test_delivery_observer_receives_anchor_and_copied_metadata(notificatio
     observed = []
 
     async def observe(name, **kwargs):
+        if name != "kanban_notify_delivered":
+            return []
         n.runner._kanban_sub_op.assert_called_once_with(
             "example", "record_notify_ping", n.sub, event_id=12,
         )
@@ -73,7 +75,11 @@ async def test_observer_failure_cannot_rewind_delivered_ping(notification, monke
     n = notification
     n.adapter.send.return_value = SendResult(success=True, message_id="delivered")
     hook = AsyncMock(side_effect=RuntimeError("observer failed"))
-    monkeypatch.setattr("hermes_cli.lifecycle.ainvoke_hook", hook)
+
+    async def invoke(name, **kwargs):
+        return await hook(**kwargs) if name == "kanban_notify_delivered" else []
+
+    monkeypatch.setattr("hermes_cli.lifecycle.ainvoke_hook", invoke)
     n.sub_fail_counts[n.sub_key] = 2
     assert await n._send_pings() is True
     hook.assert_awaited_once()
@@ -87,7 +93,11 @@ async def test_failed_send_never_emits_delivery_hook(notification, monkeypatch):
     n = notification
     n.adapter.send.return_value = SendResult(success=False, error="offline")
     hook = AsyncMock()
-    monkeypatch.setattr("hermes_cli.lifecycle.ainvoke_hook", hook)
+
+    async def invoke(name, **kwargs):
+        return await hook(**kwargs) if name == "kanban_notify_delivered" else []
+
+    monkeypatch.setattr("hermes_cli.lifecycle.ainvoke_hook", invoke)
     assert await n._send_pings() is False
     hook.assert_not_awaited()
     n.runner._kanban_sub_op.assert_not_called()

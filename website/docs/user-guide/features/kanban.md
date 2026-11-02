@@ -1357,15 +1357,12 @@ cards by merging `{"kanban_card": false}` into the subscription's `delivery_meta
 `kanban_db_notify.add_notify_sub`; this is metadata, not a CLI flag. Wake-only subscriptions,
 notification-suppression policy, and other platforms retain their existing delivery behavior.
 
-An optional notification plugin can separate live-card refreshes from attention signals. The local
-`kanban-slack-push` integration mentions its configured Slack member only for human gates and leaves
-ordinary card updates/history quiet. It accumulates activity into a durable, empty-skipping digest,
-with **need you / done / running / retried** sections linking to the exact Slack card roots. Its
-`kanban_slack_push` config and all cadence keys are documented in that plugin's module docstring;
-default slots are hourly 08:00–18:00 America/Los_Angeles plus a coalesced 18:00 end-of-day flush.
-This is plugin policy, not a change to creator wakes or an automatic deployment of the plugin.
+Notification plugins can separate live-card refreshes from attention signals: for example, highlight
+human gates while keeping ordinary updates quiet, or accumulate activity into a durable digest.
+Audience selection, scheduling, persistence and delivery retries belong to the separately shipped
+consumer, not the gateway. These presentation hooks do not change creator wakes or install a plugin.
 
-Integration authors have two additive hooks:
+Integration authors have two additive notification hooks:
 
 - `kanban_notify_prepare`: called under subscriber scope before a passive send, with `task_id`,
   `board`, `platform`, `event_id`, `event_kind`, `event_payload`, `task_title`, and `subscription`
@@ -1378,7 +1375,39 @@ Integration authors have two additive hooks:
   returning an authorized adapter or `None`. In-process consumers should use `ctx.spawn_task` for
   slow delivery so the next human signal is not held behind a digest; unload cancels these tasks.
   Callable/adapter access is not a plugin-host wire surface. `kanban_notify_delivered` remains an
-  observer after the successful passive-send checkpoint.
+  observer after the successful passive-send checkpoint. It receives the actual `message_id` (first
+  chunk for split sends, `None` for legacy adapters) and a copy of `delivery_metadata`, in addition
+  to the task, board, event and subscriber route fields. Observer failures never rewind delivery.
+
+### Minimal presentation consumer
+
+For an in-process plugin, place this `__init__.py` beside a `plugin.yaml` containing
+`name: notification-example` and `version: 1.0.0` in the active profile's plugin directory, then
+opt in with `hermes plugins enable notification-example` and restart the gateway:
+
+```python
+def prepare(platform, event_payload):
+    if platform == "slack" and event_payload.get("audience") == "human":
+        return {"attention_text": "Human input needed:"}
+
+
+def render(text):
+    return {"blocks": [{
+        "type": "section", "text": {"type": "plain_text", "text": text[:2900]},
+    }]}
+
+
+def register(ctx):
+    ctx.register_hook("kanban_notify_prepare", prepare)
+    ctx.register_hook("kanban_card_render", render)
+```
+
+This consumer adds a human-gate prefix and a bounded plain-text card layout, without board writes,
+private identities, buttons or scheduled sends. The complete text remains the accessible fallback.
+An executable copy is exercised through real plugin discovery in
+`tests/gateway/test_kanban_notification_plugin.py`. For interactive controls, validate the Slack
+actor, profile, board, current task state and idempotency receipt before any mutation; a button's
+opaque value is not authorization.
 
 **Discord threads under `profile_routes`:** when the gateway multiplexes profiles and routes a *channel*
 to a profile, a subscription created from the CLI for a *thread* in that channel needs the thread's route

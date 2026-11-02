@@ -1,4 +1,3 @@
-# health: allow FILE_LINES -- platform-tables refactor: core's PLATFORM_HINTS/_PLATFORM_DEFAULTS rows for this platform moved onto its register() call (hint text lives in adapter_hint.py); the growth is only those kwargs
 """Slack platform adapter: slack-bolt Socket Mode (messages, slash commands, threads)."""
 
 import asyncio
@@ -55,12 +54,12 @@ from gateway.platforms.base import (
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 
 try:  # sibling modules; support both package and flat plugin-dir import
-    from .block_kit import render_blocks, sanitize_blocks
+    from .block_kit import feedback_block, markdown_block_payload, render_blocks, sanitize_blocks
     from .adapter_slash_lane import SlashHandoffLanes
     from .adapter_slash_payload import slash_command_text, slash_thread_id
     from .adapter_reactions_context import slack_reactions_marker
 except ImportError:  # pragma: no cover - plugin loaded outside package context
-    from block_kit import render_blocks, sanitize_blocks  # type: ignore
+    from block_kit import feedback_block, markdown_block_payload, render_blocks, sanitize_blocks  # type: ignore
     from adapter_slash_lane import SlashHandoffLanes  # type: ignore
     from adapter_slash_payload import slash_command_text, slash_thread_id  # type: ignore
     from adapter_reactions_context import slack_reactions_marker  # type: ignore
@@ -3109,36 +3108,10 @@ class SlackAdapter(BasePlatformAdapter):
         raw = self.config.extra.get(key)
         return default if raw is None else str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
-    # Slack caps the cumulative text of all ``markdown`` blocks in a single
-    # payload at 12,000 characters.  Leave margin for the feedback block.
-    _MARKDOWN_BLOCK_MAX = 11_500
-
-    def _markdown_block_payload(self, content: str) -> Optional[list]:
-        """Return a ``markdown`` block payload, or ``None`` when empty or over Slack's 12k cap."""
-        ok = content and content.strip() and len(content) <= self._MARKDOWN_BLOCK_MAX
-        return [{"type": "markdown", "text": content}] if ok else None
-
-    def _feedback_block(self) -> dict[str, Any]:
-        """Return the Slack AI feedback-buttons block."""
-        return {
-            "type": "context_actions",
-            "elements": [
-                {
-                    "type": "feedback_buttons",
-                    "action_id": "hermes_feedback",
-                    "positive_button": {
-                        "text": {"type": "plain_text", "text": t("platform.slack.feedback.good")[:75]},
-                        "accessibility_label": t("platform.slack.feedback.good_a11y")[:75],
-                        "value": "positive"},
-                    "negative_button": {
-                        "text": {"type": "plain_text", "text": t("platform.slack.feedback.bad")[:75]},
-                        "accessibility_label": t("platform.slack.feedback.bad_a11y")[:75],
-                        "value": "negative"}}]}
-
     def _append_feedback_block(self, blocks: Optional[list]) -> Optional[list]:
         """Append response feedback controls when enabled and block budget allows."""
         if blocks and self._extra_flag("feedback_buttons") and len(blocks) < 50:
-            return [*blocks, self._feedback_block()]
+            return [*blocks, feedback_block()]
         return blocks
 
     def _maybe_blocks(self, content: str) -> Optional[list]:
@@ -3150,7 +3123,7 @@ class SlackAdapter(BasePlatformAdapter):
         (tables, headers, code fences with syntax highlighting) with Slack doing the translation (#8552). 2.
         """
         if self._extra_flag("markdown_blocks"):
-            md_blocks = self._markdown_block_payload(content)
+            md_blocks = markdown_block_payload(content)
             if md_blocks:
                 return sanitize_blocks(self._append_feedback_block(md_blocks))
         if not self._extra_flag("rich_blocks"):
