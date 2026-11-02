@@ -1,4 +1,6 @@
 """Kanban mutation-boundary policy, separate from transport and profile CRUD."""
+import contextlib
+
 from hermes_cli.kanban_db_dispatch import is_dispatch_eligible
 
 
@@ -44,13 +46,15 @@ def cmd_board_config(args):
     return 0
 
 
-def _read_board_policy(path):
-    """Inspect without initialization, schema upgrades, or new SQLite sidecars."""
-    import contextlib
+@contextlib.contextmanager
+def _board_snapshot(path):
+    """Inspect a disposable copy without initializing or writing source sidecars."""
     import sqlite3
     import tempfile
     import shutil
     from hermes_cli.sqlite_safe_read import offline_file_access
+    if not path.is_file():
+        raise ValueError("board has no existing database")
     # SQLite's ordinary read-only WAL connection may still write shared-memory
     # read marks. Inspect a disposable copy instead; never open a source DB fd
     # while this process holds SQLite locks on that database.
@@ -63,7 +67,13 @@ def _read_board_policy(path):
             if wal.exists():
                 shutil.copyfile(wal, copy.with_name(copy.name + "-wal"))
         with contextlib.closing(sqlite3.connect(copy)) as conn:
-            return board_verifier(conn)
+            conn.row_factory = sqlite3.Row
+            yield conn
+
+
+def _read_board_policy(path):
+    with _board_snapshot(path) as conn:
+        return board_verifier(conn)
 
 
 def cmd_migrate_verification(args):
@@ -112,9 +122,13 @@ def warn_root_verification_policy(config=None, *, conn=None):
         import sqlite3
         path = kb.kanban_db_path()
         override = None
-        if path.is_file():
-            with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as reader:
-                override = board_verifier(reader)
+        try:
+            if path.is_file():
+                with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as reader:
+                    override = board_verifier(reader)
+        except (sqlite3.Error, OSError) as exc:
+            kb._log.warning("Unable to inspect board verification policy: %s", exc)
+            return config
     if override is None:
         kb._log.warning("Board lacks verify_profile: a named owning profile does not inherit root "
                         "kanban.verify_profile. Set board policy with `hermes kanban --board BOARD "
@@ -358,7 +372,8 @@ def cmd_reassign_ineligible(args) -> int:
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban as cli
     try:
-        with kbc.connect_closing() as conn:
+        connection = _board_snapshot(cli.kb.kanban_db_path()) if args.dry_run else kbc.connect_closing()
+        with connection as conn:
             changes = reassign_ineligible(conn, dry_run=args.dry_run)
     except ValueError as exc:
         return cli._err(f"kanban: {exc}", 2)
