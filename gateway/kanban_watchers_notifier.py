@@ -797,6 +797,9 @@ class _KanbanNotification:
         # Pings, artifact uploads (media policy) and the wake text (display.language) all read the
         # SUBSCRIBER profile's config; the notifier thread itself runs in the launch profile's scope.
         async with self._owner_scope():
+            from gateway.kanban_slack_card import filter_settled_retries
+            events = await _to_thread_process_service(filter_settled_retries, self, self.d["events"])
+            self.d = {**self.d, "events": events}
             if not await self._send_pings():
                 return
             # All text pings delivered (or skipped for non-push / wake-only).

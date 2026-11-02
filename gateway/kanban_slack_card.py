@@ -22,6 +22,41 @@ _STATE_KINDS = {
 }
 CARD_KINDS = (*_STATE_KINDS, "status", "created", "crashed", "timed_out", "reclaimed")
 _STATUS_HEADLINE_KINDS = {"claimed", "promoted", "created", "scheduled", "specified", "review_reopened", "reclaimed"}
+_RETRY_KINDS = {"crashed", "timed_out", "gave_up", "reclaimed"}
+
+
+def _valid_state_events(events):
+    """Ignore legacy settlement after a terminal state, until a real reopen event."""
+    previous = None
+    for ev in events:
+        if previous in {"done", "archived"} and ev.kind in _RETRY_KINDS:
+            continue
+        state = _event_status(ev)
+        if state:
+            previous = state
+        yield ev
+
+
+def filter_settled_retries(n, events):
+    """Fence queued phantom retries by event order, not today's task status.
+
+    A genuine timeout before completion (or after an explicit reopen) still
+    belongs in history. Keep the claim cursor unchanged so skipped events settle.
+    """
+    if not any(ev.kind in _RETRY_KINDS for ev in events):
+        return events
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+
+    candidates = {ev.id for ev in events if ev.kind in _RETRY_KINDS}
+    with kb.pin_first_board_resolution(), kbc.connect_closing(board=n.board_slug) as conn:
+        rows = conn.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND id<=? AND kind IN ("
+            + ",".join("?" for _ in CARD_KINDS) + ") ORDER BY id",
+            (n.task_id, max(candidates), *CARD_KINDS),
+        )
+        valid = {ev.id for ev in _valid_state_events(kb.Event.from_row(row) for row in rows)
+                 if ev.id in candidates}
+    return [ev for ev in events if ev.id not in candidates or ev.id in valid]
 
 
 def uses_slack_card(sub):
@@ -67,7 +102,7 @@ def _compact_events(events):
     """
     first, latest, entries = {}, {}, {}
     previous = None
-    for ev in events:
+    for ev in _valid_state_events(events):
         state = _event_status(ev)
         if not state:
             continue
